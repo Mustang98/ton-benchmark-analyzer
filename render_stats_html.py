@@ -514,7 +514,7 @@ def main() -> None:
     for json_path in json_paths:
         with open(json_path, "r", encoding="utf-8") as f:
             stats = json.load(f)
-        name = stats.get("experiment_name") or json_path.stem
+        name = json_path.stem
         experiments.append({"name": name, "stats": stats, "path": json_path})
         names.append(name)
 
