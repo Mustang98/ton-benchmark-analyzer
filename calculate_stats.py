@@ -124,6 +124,8 @@ def compute_stats_for_type_called_from(
     cnt_blocks_with_several_sizes = 0
     cnt_blocks_with_no_compress_records = 0
     cnt_blocks_with_no_decompress_records = 0
+    cnt_blocks_with_no_original_size = 0
+    cnt_blocks_with_no_compressed_size = 0
     
     for block_id, recs in by_block.items():
         # Compression time data: all compress records
@@ -133,33 +135,13 @@ def compute_stats_for_type_called_from(
             elif rec.stage == "decompress":
                 decompression_time_points_dt.append((rec.end_ts, rec.duration_sec))
 
-        # Work per block, using any compress records with valid sizes.
-        all_original_size = {r.original_size for r in recs if r.original_size is not None and r.original_size > 0}
-        all_compressed_size = {r.compressed_size for r in recs if r.compressed_size is not None and r.compressed_size > 0}
-        if len(all_original_size) == 0 or len(all_compressed_size) == 0:
-            # raise ValueError(f"No data or compressed size for block {block_id}")
-            print(f"  {c_warn('WARNING:')} No data or compressed size for block {block_id}")
-            continue
-        if len(all_original_size) != 1 or len(all_compressed_size) != 1:
-            cnt_blocks_with_several_sizes += 1
-
-        original_size = next(iter(all_original_size))
-        compressed_size = next(iter(all_compressed_size))
-
-        # Use the earliest compress start as the block's timestamp.
-        ts_block = min(r.start_ts for r in recs)
-
-        # Block size data
-        block_size_points_dt.append((ts_block, original_size))
-
-        # Compression percent data
-        compression_percent = (original_size - compressed_size) / original_size
-        compression_percent_points_dt.append((ts_block, compression_percent))
-
         # Broadcast time data: requires both compress and decompress records.
         compress_ts = sorted([r.start_ts for r in recs if r.stage == "compress"])
         decompress_ts = sorted([r.end_ts for r in recs if r.stage == "decompress"])
         if compress_ts and decompress_ts:
+            # Use the earliest compress start as the block's timestamp.
+            ts_block = min(compress_ts)
+
             earliest_compress_ts = min(compress_ts)
             latest_decompress_ts = max(decompress_ts)
 
@@ -181,6 +163,31 @@ def compute_stats_for_type_called_from(
                 cnt_blocks_with_no_compress_records += 1
             if len(decompress_ts) == 0:
                 cnt_blocks_with_no_decompress_records += 1
+            continue
+
+        # Work per block, using any compress records with valid sizes.
+        all_original_size = {r.original_size for r in recs if r.original_size is not None and r.original_size > 0}
+        all_compressed_size = {r.compressed_size for r in recs if r.compressed_size is not None and r.compressed_size > 0}
+        
+        if len(all_original_size) == 0:
+            cnt_blocks_with_no_original_size += 1
+        if len(all_compressed_size) == 0:
+            cnt_blocks_with_no_compressed_size += 1
+        if len(all_original_size) == 0 or len(all_compressed_size) == 0:
+            continue
+        
+        if len(all_original_size) != 1 or len(all_compressed_size) != 1:
+            cnt_blocks_with_several_sizes += 1
+
+        original_size = next(iter(all_original_size))
+        compressed_size = next(iter(all_compressed_size))
+
+        # Block size data
+        block_size_points_dt.append((ts_block, original_size))
+
+        # Compression percent data
+        compression_percent = (original_size - compressed_size) / original_size
+        compression_percent_points_dt.append((ts_block, compression_percent))
 
     # Shift all time coordinates to floats (seconds since earliest_ts_global).
     def shift_points_to_origin(points: list[tuple[datetime, float | int]]) -> list[tuple[float, float | int]]:
@@ -194,6 +201,11 @@ def compute_stats_for_type_called_from(
     if cnt_blocks_with_several_sizes > 0:
         print(f"  {c_warn('WARNING:')} {cnt_blocks_with_several_sizes} blocks have several sizes")
     
+    if cnt_blocks_with_no_original_size > 0:
+        print(f"  {c_warn('WARNING:')} {cnt_blocks_with_no_original_size} blocks have no original size")
+    if cnt_blocks_with_no_compressed_size > 0:
+        print(f"  {c_warn('WARNING:')} {cnt_blocks_with_no_compressed_size} blocks have no compressed size")
+
     return TypeCalledFromStats(
         num_blocks=num_blocks,
         block_size_points=shift_points_to_origin(block_size_points_dt),

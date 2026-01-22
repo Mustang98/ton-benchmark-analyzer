@@ -8,8 +8,8 @@ Usage:
     python analyse_lifecycle.py <experiment_name> [OPTIONS]
 
 Options:
-    --lifecycle [N]           Show N block lifecycles (default: 5)
-    --lifecycle-by-sig [N]    Group lifecycles by type signature, show N samples per group (default: 1)
+    --samples [N]            Show N samples per type signature group (default: 1)
+    --limit N                 Only show top N signatures by block count
     --min-block-size SIZE     Only include blocks >= SIZE bytes (e.g. 100000 or 100K)
     --max-block-size SIZE     Only include blocks <= SIZE bytes (e.g. 100000 or 100K)
 """
@@ -74,22 +74,20 @@ def format_type_signature(sig: tuple[tuple[str, int | str], ...]) -> str:
 # Lifecycle printing
 # ---------------------------------------------------------------------------
 
-def print_block_lifecycle(block_id: str, records: List[LogRecord], origin_ts: Optional[datetime] = None) -> None:
+def print_block_lifecycle(block_id: str, records: List[LogRecord]) -> None:
     """
     Print the lifecycle of a single block showing all events in chronological order.
     
     Args:
         block_id: The block identifier
         records: List of LogRecord for this block, already sorted by timestamp
-        origin_ts: Optional reference timestamp to show relative times
     """
     if not records:
         print(f"  {c_warn('No records')}")
         return
     
-    # Use the earliest timestamp as origin if not provided
-    if origin_ts is None:
-        origin_ts = min(r.start_ts for r in records)
+    # Use this block's first event as the origin
+    origin_ts = min(r.start_ts for r in records)
     
     print(f"\n{c_label('Block:')} {c_value(block_id[:40])}{'...' if len(block_id) > 40 else ''}")
     print(f"  {c_dim('Total events:')} {len(records)}")
@@ -135,6 +133,7 @@ def print_lifecycles_by_type_signature(
     records: List[LogRecord],
     show_sample_per_group: int = 1,
     min_events: int = 2,
+    limit: Optional[int] = None,
 ) -> None:
     """
     Group blocks by their type signature and print statistics for each group.
@@ -146,10 +145,11 @@ def print_lifecycles_by_type_signature(
         records: All log records (should be pre-filtered by block size if needed)
         show_sample_per_group: Number of sample lifecycles to show per signature group (0 to skip)
         min_events: Minimum number of events required to include a block
+        limit: Only show top N signatures by block count (None = show all)
     """
     grouped = group_records_by_block_id(records)
     
-    # Filter blocks with minimum events and skip validator_session blocks
+    # Filter blocks with minimum events
     filtered = {
         k: v for k, v in grouped.items() 
         if len(v) >= min_events 
@@ -175,11 +175,12 @@ def print_lifecycles_by_type_signature(
     print(f"  {c_dim('Total unique blocks:')} {len(filtered)} {c_dim(f'(skipped {validator_session_blocks} validator_session)')}")
     print(f"  {c_dim('Unique type signatures:')} {len(by_signature)}")
     
-    # Global origin for relative timestamps
-    global_origin = min(min(r.start_ts for r in recs) for recs in filtered.values())
-    
     # Sort signatures by number of blocks (most common first)
     sorted_signatures = sorted(by_signature.items(), key=lambda x: len(x[1]), reverse=True)
+    
+    # Apply limit if specified
+    if limit is not None and limit > 0:
+        sorted_signatures = sorted_signatures[:limit]
     
     for sig, blocks in sorted_signatures:
         total_events = sum(len(recs) for _, recs in blocks)
@@ -195,63 +196,7 @@ def print_lifecycles_by_type_signature(
             samples = sorted_blocks[:show_sample_per_group]
             
             for block_id, block_records in samples:
-                print_block_lifecycle(block_id, block_records, origin_ts=global_origin)
-
-
-def print_sample_lifecycles(
-    records: List[LogRecord],
-    num_samples: int = 5,
-    min_events: int = 2,
-    sort_by: str = "events",
-) -> None:
-    """
-    Print lifecycle summaries for a sample of blocks.
-    
-    Args:
-        records: All log records (should be pre-filtered by block size if needed)
-        num_samples: Number of block lifecycles to print
-        min_events: Minimum number of events required to include a block
-        sort_by: How to select blocks - "events" (most events), "random", "earliest"
-    """
-    grouped = group_records_by_block_id(records)
-    
-    # Filter blocks with minimum events and skip validator_session blocks
-    filtered = {
-        k: v for k, v in grouped.items() 
-        if len(v) >= min_events 
-        # and not has_validator_session(v)
-    }
-    
-    if not filtered:
-        print(f"{c_warn('No blocks found matching criteria')}")
-        return
-    
-    # Count skipped blocks
-    validator_session_blocks = sum(1 for v in grouped.values() if has_validator_session(v))
-    
-    print(f"\n{'='*80}")
-    print(f"{c_label('BLOCK LIFECYCLES')}")
-    print(f"{'='*80}")
-    print(f"  {c_dim('Total unique blocks:')} {len(filtered)} {c_dim(f'(skipped {validator_session_blocks} validator_session)')}")
-    
-    # Select blocks based on sort_by
-    if sort_by == "events":
-        # Sort by number of events (descending)
-        selected = sorted(filtered.items(), key=lambda x: len(x[1]), reverse=True)[:num_samples]
-    elif sort_by == "earliest":
-        # Sort by earliest timestamp
-        selected = sorted(filtered.items(), key=lambda x: min(r.start_ts for r in x[1]))[:num_samples]
-    else:  # random
-        import random
-        items = list(filtered.items())
-        random.shuffle(items)
-        selected = items[:num_samples]
-    
-    # Global origin for relative timestamps
-    global_origin = min(min(r.start_ts for r in recs) for recs in filtered.values())
-    
-    for block_id, block_records in selected:
-        print_block_lifecycle(block_id, block_records, origin_ts=global_origin)
+                print_block_lifecycle(block_id, block_records)
 
 
 # ---------------------------------------------------------------------------
@@ -294,47 +239,40 @@ def main() -> None:
         print("Options:")
         print("  --lifecycle [N]           Show N block lifecycles (default: 5)")
         print("  --lifecycle-by-sig [N]    Group lifecycles by type signature, show N samples per group (default: 1)")
+        print("  --limit N                 Only show top N signatures by block count")
         print("  --min-block-size SIZE     Only include blocks >= SIZE bytes (e.g. 100000 or 100K)")
         print("  --max-block-size SIZE     Only include blocks <= SIZE bytes (e.g. 100000 or 100K)")
         sys.exit(1)
 
     experiment_name = sys.argv[1]
-    
-    # Check for --lifecycle flag
-    show_lifecycle = False
-    num_lifecycles = 5
-    if "--lifecycle" in sys.argv:
-        show_lifecycle = True
-        lifecycle_idx = sys.argv.index("--lifecycle")
-        if lifecycle_idx + 1 < len(sys.argv) and sys.argv[lifecycle_idx + 1].isdigit():
-            num_lifecycles = int(sys.argv[lifecycle_idx + 1])
-    
-    # Check for --lifecycle-by-sig flag
-    show_lifecycle_by_sig = False
+
+    # Check for --samples flag
     samples_per_sig = 1
-    if "--lifecycle-by-sig" in sys.argv:
-        show_lifecycle_by_sig = True
-        sig_idx = sys.argv.index("--lifecycle-by-sig")
+    if "--samples" in sys.argv:
+        sig_idx = sys.argv.index("--samples")
         if sig_idx + 1 < len(sys.argv) and sys.argv[sig_idx + 1].isdigit():
             samples_per_sig = int(sys.argv[sig_idx + 1])
-    
+
+    # Check for --limit flag
+    sig_limit: Optional[int] = None
+    if "--limit" in sys.argv:
+        limit_idx = sys.argv.index("--limit")
+        if limit_idx + 1 < len(sys.argv) and sys.argv[limit_idx + 1].isdigit():
+            sig_limit = int(sys.argv[limit_idx + 1])
+
     # Check for --min-block-size flag
     min_block_size = 0
     if "--min-block-size" in sys.argv:
         size_idx = sys.argv.index("--min-block-size")
         if size_idx + 1 < len(sys.argv):
             min_block_size = parse_size_arg(sys.argv[size_idx + 1])
-    
+
     # Check for --max-block-size flag
     max_block_size = 0
     if "--max-block-size" in sys.argv:
         size_idx = sys.argv.index("--max-block-size")
         if size_idx + 1 < len(sys.argv):
             max_block_size = parse_size_arg(sys.argv[size_idx + 1])
-    
-    # Default to --lifecycle-by-sig if no specific mode requested
-    if not show_lifecycle and not show_lifecycle_by_sig:
-        show_lifecycle_by_sig = True
     
     print(f"{c_label('Experiment:')} {c_value(experiment_name)}")
 
@@ -351,11 +289,8 @@ def main() -> None:
             size_filter_msg.append(f"<= {size_to_k_suffix(max_block_size)}")
         print(f"{c_label('Records after size filter')} ({', '.join(size_filter_msg)}): {c_value(str(len(records)))}")
     
-    # Show lifecycles grouped by type signature if requested
-    if show_lifecycle_by_sig:
-        print_lifecycles_by_type_signature(records, show_sample_per_group=samples_per_sig, min_events=2)
-    elif show_lifecycle:
-        print_sample_lifecycles(records, num_samples=num_lifecycles, min_events=2, sort_by="events")
+    # Show lifecycles grouped by type signature
+    print_lifecycles_by_type_signature(records, show_sample_per_group=samples_per_sig, min_events=2, limit=sig_limit)
 
 
 if __name__ == "__main__":

@@ -37,7 +37,8 @@ _TIME_SEC_RE = re.compile(r"time_sec=([^\s]+)")
 _COMPRESSION_RE = re.compile(r"compression=([^\s]+)")
 _ORIGINAL_SIZE_RE = re.compile(r"original_size=(\d+)")
 _COMPRESSED_SIZE_RE = re.compile(r"compressed_size=(\d+)")
-_NODE_RE = re.compile(r"devnet-(\d+)")
+# Match node ID from various formats: devnet-05, ton-tval-12, etc.
+_NODE_RE = re.compile(r"(?:devnet|ton-tval)-(\d+)")
 
 
 # ---------------------------------------------------------------------------
@@ -111,7 +112,12 @@ def _extract_block_id(line: str) -> str:
 
 def _extract_node_id(line: str) -> int:
     """
-    Extract node ID from the line prefix (e.g., 'devnet-05' -> 4 zero-indexed).
+    Extract node ID from the line prefix.
+    
+    Supports formats:
+        - 'devnet-05' -> 4 (zero-indexed)
+        - 'ton-tval-12' -> 11 (zero-indexed)
+    
     Returns -1 if not found.
     """
     m = _NODE_RE.search(line)

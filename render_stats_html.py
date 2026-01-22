@@ -14,13 +14,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Tuple, Optional
-
-
-def mean(values: List[float]) -> float:
-    if not values:
-        return 0.0
-    return sum(values) / len(values)
+from typing import Any, Dict, List
 
 
 def safe_key(type_val: Any, called_from_val: Any) -> str:
@@ -37,31 +31,10 @@ def to_js(o: Any) -> str:
     return json.dumps(o, ensure_ascii=False, separators=(",", ":"))
 
 
-def compute_averages_for_pair(pair_stats: Dict[str, Any]) -> Dict[str, float]:
-    def avg_from_points(points_key: str) -> float:
-        pts = pair_stats.get(points_key, [])
-        if not isinstance(pts, list):
-            return 0.0
-        vals = [float(y) for _, y in pts if isinstance(_, (int, float))]
-        return mean(vals)
-
-    return {
-        "num_blocks": float(pair_stats.get("num_blocks", 0)),
-        "avg_block_size_bytes": avg_from_points("block_size_points"),
-        "avg_compression_percent": avg_from_points("compression_percent_points"),
-        "avg_broadcast_time_avg_s": avg_from_points("broadcast_time_avg_points"),
-        "avg_broadcast_time_full_s": avg_from_points("broadcast_time_full_points"),
-        "avg_broadcast_time_66p_s": avg_from_points("broadcast_time_66p_points"),
-        "avg_compression_time_s": avg_from_points("compression_time_points"),
-        "avg_decompression_time_s": avg_from_points("decompression_time_points"),
-    }
-
-
 def build_html(title: str, experiments: List[Dict[str, Any]]) -> str:
     # experiments: [{"name": str, "stats": dict}]
     # Build union of (type, called_from) pairs across experiments
     union_map: Dict[str, Dict[str, Any]] = {}
-    exp_pairs: List[Tuple[str, Dict[str, Any]]] = []
     for exp in experiments:
         tos: Dict[str, Dict[str, Any]] = exp["stats"].get("type_called_from_stats", {})
         for k, pair in tos.items():
@@ -108,17 +81,18 @@ def build_html(title: str, experiments: List[Dict[str, Any]]) -> str:
         }
         for exp in experiments:
             exp_name = exp["name"]
+            base_ts = exp["stats"].get("earliest_ts_global", None)  # ISO timestamp string
             tos: Dict[str, Dict[str, Any]] = exp["stats"].get("type_called_from_stats", {})
             pair = tos.get(k)
             if not pair:
                 continue
-            entry["block_size_series"].append({"name": exp_name, "points": pair.get("block_size_points", [])})
-            entry["compression_percent_series"].append({"name": exp_name, "points": pair.get("compression_percent_points", [])})
-            entry["broadcast_time_avg_series"].append({"name": exp_name, "points": pair.get("broadcast_time_avg_points", [])})
-            entry["broadcast_time_full_series"].append({"name": exp_name, "points": pair.get("broadcast_time_full_points", [])})
-            entry["broadcast_time_66p_series"].append({"name": exp_name, "points": pair.get("broadcast_time_66p_points", [])})
-            entry["compression_time_series"].append({"name": exp_name, "points": pair.get("compression_time_points", [])})
-            entry["decompression_time_series"].append({"name": exp_name, "points": pair.get("decompression_time_points", [])})
+            entry["block_size_series"].append({"name": exp_name, "base_ts": base_ts, "points": pair.get("block_size_points", [])})
+            entry["compression_percent_series"].append({"name": exp_name, "base_ts": base_ts, "points": pair.get("compression_percent_points", [])})
+            entry["broadcast_time_avg_series"].append({"name": exp_name, "base_ts": base_ts, "points": pair.get("broadcast_time_avg_points", [])})
+            entry["broadcast_time_full_series"].append({"name": exp_name, "base_ts": base_ts, "points": pair.get("broadcast_time_full_points", [])})
+            entry["broadcast_time_66p_series"].append({"name": exp_name, "base_ts": base_ts, "points": pair.get("broadcast_time_66p_points", [])})
+            entry["compression_time_series"].append({"name": exp_name, "base_ts": base_ts, "points": pair.get("compression_time_points", [])})
+            entry["decompression_time_series"].append({"name": exp_name, "base_ts": base_ts, "points": pair.get("decompression_time_points", [])})
         plots_data[k] = entry
 
     # Build HTML
@@ -203,114 +177,101 @@ def build_html(title: str, experiments: List[Dict[str, Any]]) -> str:
       width: 100%;
       height: 320px;
     }}
+    /* Timeline slider */
+    .timeline-container {{
+      background: white;
+      border-radius: 8px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.06);
+      padding: 16px;
+      margin: 16px 0;
+    }}
+    .timeline-header {{
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+    }}
+    .timeline-header h2 {{
+      margin: 0;
+      font-size: 16px;
+    }}
+    .timeline-labels {{
+      display: flex;
+      gap: 24px;
+      font-size: 13px;
+      color: #374151;
+    }}
+    .timeline-labels span {{
+      font-family: monospace;
+    }}
+    .timeline-track {{
+      position: relative;
+      height: 40px;
+      background: #e5e7eb;
+      border-radius: 6px;
+      cursor: pointer;
+      user-select: none;
+    }}
+    .timeline-selection {{
+      position: absolute;
+      top: 0;
+      height: 100%;
+      background: #3b82f6;
+      opacity: 0.3;
+      border-radius: 6px;
+    }}
+    .timeline-handle {{
+      position: absolute;
+      top: 0;
+      width: 12px;
+      height: 100%;
+      background: #1d4ed8;
+      border-radius: 4px;
+      cursor: ew-resize;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: white;
+      font-size: 10px;
+      font-weight: bold;
+      z-index: 2;
+    }}
+    .timeline-handle:hover {{
+      background: #1e40af;
+    }}
+    .timeline-handle.left {{
+      border-top-right-radius: 0;
+      border-bottom-right-radius: 0;
+    }}
+    .timeline-handle.right {{
+      border-top-left-radius: 0;
+      border-bottom-left-radius: 0;
+    }}
   </style>
 </head>
 <body>
   <h1>{title}</h1>
 
-  <div class="card">
+  <div class="timeline-container">
+    <div class="timeline-header">
+      <h2>Time Range Filter</h2>
+      <div class="timeline-labels">
+        <span>L: <span id="timeline-label-left">--</span></span>
+        <span>R: <span id="timeline-label-right">--</span></span>
+        <span>Duration: <span id="timeline-duration">--</span></span>
+      </div>
+    </div>
+    <div class="timeline-track" id="timeline-track">
+      <div class="timeline-selection" id="timeline-selection"></div>
+      <div class="timeline-handle left" id="timeline-handle-left">L</div>
+      <div class="timeline-handle right" id="timeline-handle-right">R</div>
+    </div>
+  </div>
+
+  <div class="card" id="averages-card">
     <h2 style="margin-top:0">Averages overview</h2>
-    <div style="overflow:auto; max-height: 60vh;">
-      <table>
-        <thead>
-          <tr>
-            <th>Parameter</th>"""
-    # Header row 1: Parameter + each (type, called_from) spanning N experiments
-    for k in union_keys:
-        label = union_map[k]["label"]
-        html += f"<th class=\"group-start\" colspan=\"{len(experiments)}\">{label}</th>"
-    html += "</tr>"
-    # Header row 2: empty cell + per-pair subcolumns named by experiment short names
-    html += "<tr><th></th>"
-    for _ in union_keys:
-        for idx, short in enumerate(exp_short_names):
-            cls = " class=\"group-start\"" if idx == 0 else ""
-            html += f"<th{cls}>{short}</th>"
-    html += "</tr></thead><tbody>"
-
-    for key_name, row_label in rows_spec:
-        html += f"<tr><td>{row_label}</td>"
-        # For each pair in union, compute best subcolumn index when applicable
-        for k in union_keys:
-            # Gather raw values per experiment for this pair/row
-            group_vals: List[Optional[float]] = []
-            for exp in experiments:
-                tos: Dict[str, Dict[str, Any]] = exp["stats"].get("type_called_from_stats", {})
-                pair = tos.get(k)
-                if not pair:
-                    group_vals.append(None)
-                    continue
-                avg_map = compute_averages_for_pair(pair)
-                val = avg_map.get(key_name, None)
-                group_vals.append(val if isinstance(val, (int, float)) else None)
-
-            # Decide best index: higher is better for compression percent, lower for broadcast times
-            best_idx: Optional[int] = None
-            if key_name in ("avg_compression_percent",):
-                # pick max among non-None
-                best_val = None
-                for idx, v in enumerate(group_vals):
-                    if v is None:
-                        continue
-                    if best_val is None or v > best_val:
-                        best_val = v
-                        best_idx = idx
-            elif key_name in ("avg_broadcast_time_avg_s", "avg_broadcast_time_full_s", "avg_broadcast_time_66p_s"):
-                # pick min among non-None
-                best_val = None
-                for idx, v in enumerate(group_vals):
-                    if v is None:
-                        continue
-                    if best_val is None or v < best_val:
-                        best_val = v
-                        best_idx = idx
-
-            # Emit cells per experiment with formatting and highlighting
-            for idx, exp in enumerate(experiments):
-                tos: Dict[str, Dict[str, Any]] = exp["stats"].get("type_called_from_stats", {})
-                pair = tos.get(k)
-                base_cls = " group-start" if idx == 0 else ""
-
-                if not pair:
-                    cls_attr = f" class=\"{base_cls.strip()}\"" if base_cls else ""
-                    html += f"<td{cls_attr}>-</td>"
-                    continue
-
-                avg_map = compute_averages_for_pair(pair)
-                val = avg_map.get(key_name, None)
-
-                # Determine highlighting for relevant rows
-                extra_cls = ""
-                if best_idx is not None and isinstance(val, (int, float)):
-                    if idx == best_idx:
-                        extra_cls = " best-cell"
-                    else:
-                        extra_cls = " other-cell"
-
-                cls_combo = (base_cls + extra_cls).strip()
-                cls_attr = f" class=\"{cls_combo}\"" if cls_combo else ""
-
-                if key_name == "num_blocks":
-                    cell = f"{int(val or 0)}"
-                elif key_name == "avg_block_size_bytes":
-                    vv = float(val or 0.0)
-                    kb = int(round(vv / 1024.0)) if vv else 0
-                    cell = f"{kb} KB"
-                elif "percent" in key_name:
-                    vv = float(val or 0.0)
-                    cell = f"{vv*100:.2f}%"
-                elif key_name in ("avg_broadcast_time_avg_s", "avg_broadcast_time_full_s", "avg_broadcast_time_66p_s"):
-                    vv = float(val or 0.0)
-                    cell = f"{vv:.2f} s"
-                elif key_name in ("avg_compression_time_s", "avg_decompression_time_s"):
-                    vv = float(val or 0.0)
-                    cell = f"{vv*1000:.2f} ms"
-                else:
-                    vv = float(val or 0.0)
-                    cell = f"{vv:.3f}"
-                html += f"<td{cls_attr}>{cell}</td>"
-        html += "</tr>"
-    html += "</tbody></table></div></div>"
+    <div id="averages-table-container" style="overflow:auto; max-height: 60vh;"></div>
+  </div>"""
 
     # Tabs
     html += '<div class="card"><h2 style="margin-top:0">Details</h2>'
@@ -351,27 +312,209 @@ def build_html(title: str, experiments: List[Dict[str, Any]]) -> str:
     html += "</div>"  # end card
 
     # Inject data and JS
+    # Prepare additional data for JS
+    rows_spec_js = [
+        ["num_blocks", "Blocks"],
+        ["avg_block_size_bytes", "Avg block size (KB)"],
+        ["avg_compression_percent", "Avg compression percent"],
+        ["avg_broadcast_time_avg_s", "Avg broadcast time (avg)"],
+        ["avg_broadcast_time_66p_s", "Avg broadcast time (66p)"],
+        ["avg_broadcast_time_full_s", "Avg broadcast time (full)"],
+        ["avg_compression_time_s", "Avg compression time (ms)"],
+        ["avg_decompression_time_s", "Avg decompression time (ms)"],
+    ]
+    
     html += "<script>\n"
     html += "const PLOTS_DATA = " + to_js(plots_data) + ";\n"
+    html += "const UNION_KEYS = " + to_js(union_keys) + ";\n"
+    html += "const UNION_MAP = " + to_js(union_map) + ";\n"
+    html += "const EXP_SHORT_NAMES = " + to_js(exp_short_names) + ";\n"
+    html += "const ROWS_SPEC = " + to_js(rows_spec_js) + ";\n"
     html += r"""
 let averagingWindowSec = 60; // default 1 minute
 let trimEdges = true; // default trim enabled
 
+// Timeline range (in data coordinates - seconds from start)
+let globalMinT = Infinity;
+let globalMaxT = -Infinity;
+let rangeMinT = 0;  // current left bound
+let rangeMaxT = 0;  // current right bound
+let globalBaseTsMs = null;  // base timestamp in milliseconds for converting to actual dates
+
+// Compute global time range from all data
+function computeGlobalTimeRange() {
+  let earliestAbsoluteMs = Infinity;
+  
+  for (const key of Object.keys(PLOTS_DATA)) {
+    const item = PLOTS_DATA[key];
+    const allSeries = [
+      ...(item.block_size_series || []),
+      ...(item.compression_percent_series || []),
+      ...(item.broadcast_time_avg_series || []),
+      ...(item.broadcast_time_full_series || []),
+      ...(item.broadcast_time_66p_series || []),
+      ...(item.compression_time_series || []),
+      ...(item.decompression_time_series || []),
+    ];
+    for (const s of allSeries) {
+      // Track the base timestamp that produces the earliest absolute time
+      const baseMs = s.base_ts ? new Date(s.base_ts).getTime() : 0;
+      for (const [t, _] of (s.points || [])) {
+        if (t < globalMinT) globalMinT = t;
+        if (t > globalMaxT) globalMaxT = t;
+        const absMs = baseMs + t * 1000;
+        if (absMs < earliestAbsoluteMs) {
+          earliestAbsoluteMs = absMs;
+          globalBaseTsMs = baseMs;
+        }
+      }
+    }
+  }
+  if (globalMinT === Infinity) globalMinT = 0;
+  if (globalMaxT === -Infinity) globalMaxT = 1;
+  if (globalBaseTsMs === null) globalBaseTsMs = 0;
+  rangeMinT = globalMinT;
+  rangeMaxT = globalMaxT;
+}
+
+function formatDuration(seconds) {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  if (h > 0) return `${h}h ${m}m ${s}s`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+function secsToTimestamp(secs) {
+  if (globalBaseTsMs === null) return formatDuration(secs);
+  const d = new Date(globalBaseTsMs + secs * 1000);
+  // Format as HH:MM:SS
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  const ss = String(d.getSeconds()).padStart(2, '0');
+  return `${hh}:${mm}:${ss}`;
+}
+
+function updateTimelineLabels() {
+  document.getElementById('timeline-label-left').textContent = secsToTimestamp(rangeMinT);
+  document.getElementById('timeline-label-right').textContent = secsToTimestamp(rangeMaxT);
+  document.getElementById('timeline-duration').textContent = formatDuration(rangeMaxT - rangeMinT);
+}
+
+function updateTimelineHandles() {
+  const track = document.getElementById('timeline-track');
+  const handleL = document.getElementById('timeline-handle-left');
+  const handleR = document.getElementById('timeline-handle-right');
+  const selection = document.getElementById('timeline-selection');
+  
+  const trackWidth = track.offsetWidth;
+  const range = globalMaxT - globalMinT;
+  if (range <= 0) return;
+  
+  const leftPct = (rangeMinT - globalMinT) / range;
+  const rightPct = (rangeMaxT - globalMinT) / range;
+  
+  const leftPx = leftPct * trackWidth;
+  const rightPx = rightPct * trackWidth;
+  
+  handleL.style.left = `${leftPx - 6}px`;  // center the 12px handle
+  handleR.style.left = `${rightPx - 6}px`;
+  
+  selection.style.left = `${leftPx}px`;
+  selection.style.width = `${rightPx - leftPx}px`;
+  
+  updateTimelineLabels();
+}
+
+function setupTimelineDrag() {
+  const track = document.getElementById('timeline-track');
+  const handleL = document.getElementById('timeline-handle-left');
+  const handleR = document.getElementById('timeline-handle-right');
+  
+  let dragging = null;  // 'left' or 'right'
+  
+  function onMove(e) {
+    if (!dragging) return;
+    const rect = track.getBoundingClientRect();
+    const x = (e.clientX || e.touches[0].clientX) - rect.left;
+    const pct = Math.max(0, Math.min(1, x / rect.width));
+    const t = globalMinT + pct * (globalMaxT - globalMinT);
+    
+    if (dragging === 'left') {
+      rangeMinT = Math.min(t, rangeMaxT - 1);
+    } else {
+      rangeMaxT = Math.max(t, rangeMinT + 1);
+    }
+    updateTimelineHandles();
+  }
+  
+  function onEnd() {
+    if (dragging) {
+      dragging = null;
+      rebuildAll();
+    }
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onEnd);
+    document.removeEventListener('touchmove', onMove);
+    document.removeEventListener('touchend', onEnd);
+  }
+  
+  function startDrag(handle, e) {
+    e.preventDefault();
+    dragging = handle;
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onEnd);
+    document.addEventListener('touchmove', onMove);
+    document.addEventListener('touchend', onEnd);
+  }
+  
+  handleL.addEventListener('mousedown', e => startDrag('left', e));
+  handleL.addEventListener('touchstart', e => startDrag('left', e));
+  handleR.addEventListener('mousedown', e => startDrag('right', e));
+  handleR.addEventListener('touchstart', e => startDrag('right', e));
+  
+  // Click on track to move nearest handle
+  track.addEventListener('click', e => {
+    if (e.target === handleL || e.target === handleR) return;
+    const rect = track.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const pct = x / rect.width;
+    const t = globalMinT + pct * (globalMaxT - globalMinT);
+    
+    // Move nearest handle
+    const distL = Math.abs(t - rangeMinT);
+    const distR = Math.abs(t - rangeMaxT);
+    if (distL < distR) {
+      rangeMinT = Math.min(t, rangeMaxT - 1);
+    } else {
+      rangeMaxT = Math.max(t, rangeMinT + 1);
+    }
+    updateTimelineHandles();
+    rebuildAll();
+  });
+}
+
 function aggregatePoints(points, windowSec) {
   if (!points || points.length === 0) return [];
   const sorted = points.slice().sort((a,b) => a[0] - b[0]);
-  let minT = sorted[0][0];
-  let maxT = sorted[sorted.length - 1][0];
+  
+  // Apply timeline range filter first
+  const rangeFiltered = sorted.filter(([t,_]) => t >= rangeMinT && t <= rangeMaxT);
+  if (rangeFiltered.length === 0) return [];
+  
+  let minT = rangeFiltered[0][0];
+  let maxT = rangeFiltered[rangeFiltered.length - 1][0];
   let allowedMin = trimEdges ? (minT + 300) : minT;  // +5 min
   let allowedMax = trimEdges ? (maxT - 120)  : maxT;  // -2 min
   if (allowedMax < allowedMin) return [];
 
   if (!windowSec || windowSec <= 0) {
-    return sorted.filter(([t,_]) => t >= allowedMin && t <= allowedMax);
+    return rangeFiltered.filter(([t,_]) => t >= allowedMin && t <= allowedMax);
   }
 
   const buckets = new Map();
-  for (const [t, v] of sorted) {
+  for (const [t, v] of rangeFiltered) {
     if (t < allowedMin || t > allowedMax) continue;
     const b = Math.floor(t / windowSec);
     const cur = buckets.get(b);
@@ -393,20 +536,180 @@ function aggregatePoints(points, windowSec) {
   return out;
 }
 
+// Compute averages for a (type, called_from) pair within current time range
+function computeAveragesForPair(pairData) {
+  function avgFromPoints(pointsKey) {
+    const pts = pairData[pointsKey] || [];
+    // Filter by timeline range
+    const filtered = pts.filter(([t,_]) => t >= rangeMinT && t <= rangeMaxT);
+    if (filtered.length === 0) return 0;
+    const sum = filtered.reduce((acc, [_,v]) => acc + v, 0);
+    return sum / filtered.length;
+  }
+  
+  function countFromPoints(pointsKey) {
+    const pts = pairData[pointsKey] || [];
+    return pts.filter(([t,_]) => t >= rangeMinT && t <= rangeMaxT).length;
+  }
+  
+  return {
+    num_blocks: countFromPoints('block_size_points'),
+    avg_block_size_bytes: avgFromPoints('block_size_points'),
+    avg_compression_percent: avgFromPoints('compression_percent_points'),
+    avg_broadcast_time_avg_s: avgFromPoints('broadcast_time_avg_points'),
+    avg_broadcast_time_full_s: avgFromPoints('broadcast_time_full_points'),
+    avg_broadcast_time_66p_s: avgFromPoints('broadcast_time_66p_points'),
+    avg_compression_time_s: avgFromPoints('compression_time_points'),
+    avg_decompression_time_s: avgFromPoints('decompression_time_points'),
+  };
+}
+
+function rebuildAveragesTable() {
+  const container = document.getElementById('averages-table-container');
+  
+  let html = '<table><thead><tr><th>Parameter</th>';
+  // Header row 1: (type, called_from) groups
+  for (const k of UNION_KEYS) {
+    const label = UNION_MAP[k].label;
+    html += `<th class="group-start" colspan="${EXP_SHORT_NAMES.length}">${label}</th>`;
+  }
+  html += '</tr><tr><th></th>';
+  // Header row 2: experiment names
+  for (const _ of UNION_KEYS) {
+    for (let i = 0; i < EXP_SHORT_NAMES.length; i++) {
+      const cls = i === 0 ? ' class="group-start"' : '';
+      html += `<th${cls}>${EXP_SHORT_NAMES[i]}</th>`;
+    }
+  }
+  html += '</tr></thead><tbody>';
+  
+  // Compute all averages first
+  const allAvgs = {};  // allAvgs[unionKey][expIdx] = avgMap
+  for (const k of UNION_KEYS) {
+    allAvgs[k] = [];
+    const item = PLOTS_DATA[k];
+    if (!item) {
+      for (let i = 0; i < EXP_SHORT_NAMES.length; i++) allAvgs[k].push(null);
+      continue;
+    }
+    // For each experiment, find its data in the series
+    for (let expIdx = 0; expIdx < EXP_SHORT_NAMES.length; expIdx++) {
+      // Build pair data from the series for this experiment
+      const pairData = {
+        block_size_points: item.block_size_series[expIdx]?.points || [],
+        compression_percent_points: item.compression_percent_series[expIdx]?.points || [],
+        broadcast_time_avg_points: item.broadcast_time_avg_series[expIdx]?.points || [],
+        broadcast_time_full_points: item.broadcast_time_full_series[expIdx]?.points || [],
+        broadcast_time_66p_points: item.broadcast_time_66p_series[expIdx]?.points || [],
+        compression_time_points: item.compression_time_series[expIdx]?.points || [],
+        decompression_time_points: item.decompression_time_series[expIdx]?.points || [],
+      };
+      const avgMap = computeAveragesForPair(pairData);
+      allAvgs[k].push(avgMap);
+    }
+  }
+  
+  // Rows
+  for (const [keyName, rowLabel] of ROWS_SPEC) {
+    html += `<tr><td>${rowLabel}</td>`;
+    
+    for (const k of UNION_KEYS) {
+      // Gather values for this pair across experiments
+      const groupVals = allAvgs[k].map(avg => avg ? avg[keyName] : null);
+      
+      // Determine best index
+      let bestIdx = null;
+      if (keyName === 'avg_compression_percent') {
+        let bestVal = null;
+        for (let i = 0; i < groupVals.length; i++) {
+          if (groupVals[i] != null && (bestVal === null || groupVals[i] > bestVal)) {
+            bestVal = groupVals[i];
+            bestIdx = i;
+          }
+        }
+      } else if (['avg_broadcast_time_avg_s', 'avg_broadcast_time_full_s', 'avg_broadcast_time_66p_s'].includes(keyName)) {
+        let bestVal = null;
+        for (let i = 0; i < groupVals.length; i++) {
+          if (groupVals[i] != null && groupVals[i] > 0 && (bestVal === null || groupVals[i] < bestVal)) {
+            bestVal = groupVals[i];
+            bestIdx = i;
+          }
+        }
+      }
+      
+      // Emit cells
+      for (let i = 0; i < EXP_SHORT_NAMES.length; i++) {
+        let baseCls = i === 0 ? 'group-start' : '';
+        const val = groupVals[i];
+        
+        if (val == null || (keyName === 'num_blocks' && val === 0)) {
+          const clsAttr = baseCls ? ` class="${baseCls}"` : '';
+          html += `<td${clsAttr}>-</td>`;
+          continue;
+        }
+        
+        let extraCls = '';
+        if (bestIdx !== null) {
+          if (i === bestIdx) extraCls = 'best-cell';
+          else extraCls = 'other-cell';
+        }
+        const clsCombo = [baseCls, extraCls].filter(c => c).join(' ');
+        const clsAttr = clsCombo ? ` class="${clsCombo}"` : '';
+        
+        let cell;
+        if (keyName === 'num_blocks') {
+          cell = Math.round(val);
+        } else if (keyName === 'avg_block_size_bytes') {
+          cell = Math.round(val / 1024) + ' KB';
+        } else if (keyName.includes('percent')) {
+          cell = (val * 100).toFixed(2) + '%';
+        } else if (['avg_broadcast_time_avg_s', 'avg_broadcast_time_full_s', 'avg_broadcast_time_66p_s'].includes(keyName)) {
+          cell = val.toFixed(2) + ' s';
+        } else if (['avg_compression_time_s', 'avg_decompression_time_s'].includes(keyName)) {
+          cell = (val * 1000).toFixed(2) + ' ms';
+        } else {
+          cell = val.toFixed(3);
+        }
+        html += `<td${clsAttr}>${cell}</td>`;
+      }
+    }
+    html += '</tr>';
+  }
+  
+  html += '</tbody></table>';
+  container.innerHTML = html;
+}
+
+function rebuildAll() {
+  rebuildAveragesTable();
+  const active = document.querySelector('.tab-btn.active');
+  if (active) {
+    renderTab(active.dataset.tab);
+  }
+}
+
+// Convert relative seconds to Date given base timestamp
+function secsToDate(baseTsStr, secs) {
+  if (!baseTsStr) return new Date(secs * 1000);  // fallback: treat as unix epoch
+  const baseMs = new Date(baseTsStr).getTime();
+  return new Date(baseMs + secs * 1000);
+}
+
 function plotSeriesMulti(divId, title, xLabel, yLabel, seriesList, yTickFormat = null, valueScale = 1.0) {
   const traces = [];
   for (const s of (seriesList || [])) {
     const ptsRaw = Array.isArray(s.points) ? s.points : [];
     const scaled = (valueScale === 1.0) ? ptsRaw : ptsRaw.map(p => [p[0], p[1] * valueScale]);
     const pts = aggregatePoints(scaled, averagingWindowSec);
-    const x = pts.map(p => p[0]);
+    // Convert seconds to actual timestamps using base_ts
+    const x = pts.map(p => secsToDate(s.base_ts, p[0]));
     const y = pts.map(p => p[1]);
     traces.push({ x, y, type: 'scatter', mode: 'lines', name: s.name, line: { width: 2 } });
   }
   const layout = {
     title: title,
-    margin: {l: 50, r: 20, t: 40, b: 40},
-    xaxis: { title: xLabel },
+    margin: {l: 50, r: 20, t: 40, b: 60},
+    xaxis: { title: xLabel, type: 'date' },
     yaxis: { title: yLabel, rangemode: 'tozero' },
   };
   if (yTickFormat) { layout.yaxis.tickformat = yTickFormat; }
@@ -416,13 +719,13 @@ function plotSeriesMulti(divId, title, xLabel, yLabel, seriesList, yTickFormat =
 function renderTab(key) {
   const item = PLOTS_DATA[key];
   if (!item) return;
-  plotSeriesMulti(`${key}-block_size`, `${item.label} - Block size`, "t (s)", "size (bytes)", item.block_size_series);
-  plotSeriesMulti(`${key}-compression_percent`, `${item.label} - Compression %`, "t (s)", "percent", item.compression_percent_series, '.2f', 100.0);
-  plotSeriesMulti(`${key}-broadcast_avg`, `${item.label} - Broadcast (avg)`, "t (s)", "seconds", item.broadcast_time_avg_series, '.2f');
-  plotSeriesMulti(`${key}-broadcast_66p`, `${item.label} - Broadcast (66p)`, "t (s)", "seconds", item.broadcast_time_66p_series, '.2f');
-  plotSeriesMulti(`${key}-broadcast_full`, `${item.label} - Broadcast (full)`, "t (s)", "seconds", item.broadcast_time_full_series, '.2f');
-  plotSeriesMulti(`${key}-compression_time`, `${item.label} - Compression time`, "t (s)", "milliseconds", item.compression_time_series, '.2f', 1000.0);
-  plotSeriesMulti(`${key}-decompression_time`, `${item.label} - Decompression time`, "t (s)", "milliseconds", item.decompression_time_series, '.2f', 1000.0);
+  plotSeriesMulti(`${key}-block_size`, `${item.label} - Block size`, "time", "size (bytes)", item.block_size_series);
+  plotSeriesMulti(`${key}-compression_percent`, `${item.label} - Compression %`, "time", "percent", item.compression_percent_series, '.2f', 100.0);
+  plotSeriesMulti(`${key}-broadcast_avg`, `${item.label} - Broadcast (avg)`, "time", "seconds", item.broadcast_time_avg_series, '.2f');
+  plotSeriesMulti(`${key}-broadcast_66p`, `${item.label} - Broadcast (66p)`, "time", "seconds", item.broadcast_time_66p_series, '.2f');
+  plotSeriesMulti(`${key}-broadcast_full`, `${item.label} - Broadcast (full)`, "time", "seconds", item.broadcast_time_full_series, '.2f');
+  plotSeriesMulti(`${key}-compression_time`, `${item.label} - Compression time`, "time", "milliseconds", item.compression_time_series, '.2f', 1000.0);
+  plotSeriesMulti(`${key}-decompression_time`, `${item.label} - Decompression time`, "time", "milliseconds", item.decompression_time_series, '.2f', 1000.0);
 }
 
 function setActiveTab(key) {
@@ -468,6 +771,14 @@ trimCheckbox.addEventListener('change', e => {
   }
 });
 
+// Initialize timeline
+computeGlobalTimeRange();
+setupTimelineDrag();
+updateTimelineHandles();
+
+// Build initial averages table
+rebuildAveragesTable();
+
 // Activate the first tab by default
 const firstBtn = document.querySelector('.tab-btn');
 if (firstBtn) {
@@ -475,6 +786,11 @@ if (firstBtn) {
   setActiveTab(key);
   renderTab(key);
 }
+
+// Handle window resize for timeline
+window.addEventListener('resize', () => {
+  updateTimelineHandles();
+});
 </script>
 </body>
 </html>

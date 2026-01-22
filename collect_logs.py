@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
 """
-Collect benchmark lines from centralized devnet logs.
+Collect benchmark lines from centralized devnet/testnet logs.
 
-Reads devnet_YYYY-MM-DD.log files from devnet-log.toncenter.com:/var/log/devnet,
-filters ONLY lines containing "Broadcast_benchmark" within a [start, end] time
-window extracted from the given dashboard URL, and writes:
+Reads log files from remote servers, filters ONLY lines containing
+"Broadcast_benchmark" within a [start, end] time window, and writes:
 
   logs/<experiment_name>/benchmark.log
   logs/<experiment_name>/info.json
 
 Usage:
-  python3 collect_logs.py <experiment_name> <dashboard_url>
+  python3 collect_logs.py <experiment_name> [OPTIONS]
+
+Options:
+  --testnet          Collect from testnet logs instead of devnet
+  --dashboard URL    Dashboard URL with start/end timestamps
+
+If no --dashboard is provided, collects all benchmark logs for today (UTC).
 """
 
 from __future__ import annotations
@@ -26,9 +31,21 @@ from typing import Iterable
 from urllib.parse import urlparse, parse_qs, unquote
 
 
-LOG_HOST = "devnet-log.toncenter.com"
+# Network configurations
+NETWORKS = {
+    "devnet": {
+        "host": "devnet-log.toncenter.com",
+        "remote_dir": "/var/log/devnet",
+        "file_prefix": "devnet",
+    },
+    "testnet": {
+        "host": "devnet-log.toncenter.com",
+        "remote_dir": "/var/log/testnet",
+        "file_prefix": "testnet",
+    },
+}
+
 LOG_USER = "vallas"
-REMOTE_DIR = "/var/log/devnet"
 NEEDLE = "Broadcast_benchmark"
 
 
@@ -83,9 +100,15 @@ def die(msg: str) -> None:
 def usage() -> None:
     print(
         "Usage:\n"
-        "  python3 collect_logs.py <experiment_name> <dashboard_url>\n\n"
-        "Example:\n"
-        '  python3 collect_logs.py current_compr "http://devnet-01.toncenter.com:8000/?start=2026-01-13T21%3A15%3A33Z&end=2026-01-13T22%3A15%3A42Z"\n',
+        "  python3 collect_logs.py <experiment_name> [OPTIONS]\n\n"
+        "Options:\n"
+        "  --testnet          Collect from testnet logs instead of devnet\n"
+        "  --dashboard URL    Dashboard URL with start/end timestamps\n\n"
+        "If no --dashboard is provided, collects all benchmark logs for today (UTC).\n\n"
+        "Examples:\n"
+        '  python3 collect_logs.py current_compr --dashboard "http://devnet-01.toncenter.com:8000/?start=2026-01-13T21%3A15%3A33Z&end=2026-01-13T22%3A15%3A42Z"\n'
+        "  python3 collect_logs.py today_logs\n"
+        "  python3 collect_logs.py testnet_today --testnet\n",
         file=sys.stderr,
     )
 
@@ -171,12 +194,22 @@ def ensure_local_outputs(experiment: str) -> tuple[Path, Path, Path]:
     return exp_dir, bench_log, info_json
 
 
-def write_info_json(info_path: Path, experiment: str, url: str, w: Window) -> None:
-    payload = {"name": experiment, "url": url, "start": to_z(w.start), "end": to_z(w.end)}
+def write_info_json(info_path: Path, experiment: str, url: str | None, w: Window, network: str = "devnet") -> None:
+    payload = {"name": experiment, "network": network, "url": url, "start": to_z(w.start), "end": to_z(w.end)}
     info_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def ssh_extract_file(remote_file: str, start_cmp: str, end_cmp: str, out_fh) -> None:
+def today_window_utc() -> Window:
+    """
+    Create a Window spanning all of today in UTC.
+    """
+    today = datetime.now(timezone.utc).date()
+    start = datetime.combine(today, time(0, 0, 0), tzinfo=timezone.utc)
+    end = datetime.combine(today, time(23, 59, 59, 999999), tzinfo=timezone.utc)
+    return Window(start=start, end=end)
+
+
+def ssh_extract_file(host: str, remote_file: str, start_cmp: str, end_cmp: str, out_fh) -> None:
     """
     Stream filtered lines from a remote file to out_fh.
 
@@ -224,7 +257,7 @@ LC_ALL=C awk -v s="$start" -v e="$end" '
 """ % (NEEDLE.replace('"', '\\"'))
 
     proc = subprocess.run(
-        ["ssh", f"{LOG_USER}@{LOG_HOST}", "bash", "-s", "--", remote_file, start_cmp, end_cmp],
+        ["ssh", f"{LOG_USER}@{host}", "bash", "-s", "--", remote_file, start_cmp, end_cmp],
         input=remote_script.encode("utf-8"),
         stdout=out_fh,
         stderr=subprocess.PIPE,
@@ -243,22 +276,57 @@ def day_bounds_utc(d: date) -> tuple[datetime, datetime]:
 
 
 def main() -> None:
-    if len(sys.argv) < 3:
+    if len(sys.argv) < 2:
         usage()
         sys.exit(1)
 
-    experiment = sys.argv[1]
-    dashboard_url = sys.argv[2]
+    # Parse arguments
+    args = sys.argv[1:]
+    
+    # Extract --testnet flag
+    use_testnet = "--testnet" in args
+    if use_testnet:
+        args.remove("--testnet")
+    
+    # Extract --dashboard URL
+    dashboard_url: str | None = None
+    if "--dashboard" in args:
+        dash_idx = args.index("--dashboard")
+        if dash_idx + 1 >= len(args):
+            die("--dashboard requires a URL argument")
+        dashboard_url = args[dash_idx + 1]
+        # Remove both --dashboard and its value
+        args.pop(dash_idx + 1)
+        args.pop(dash_idx)
+    
+    if not args:
+        usage()
+        sys.exit(1)
+    
+    experiment = args[0]
+    
+    # Select network configuration
+    network = "testnet" if use_testnet else "devnet"
+    net_config = NETWORKS[network]
+    host = net_config["host"]
+    remote_dir = net_config["remote_dir"]
+    file_prefix = net_config["file_prefix"]
 
-    try:
-        w = parse_dashboard_url(dashboard_url)
-    except Exception as e:
-        die(str(e))
+    if dashboard_url:
+        try:
+            w = parse_dashboard_url(dashboard_url)
+        except Exception as e:
+            die(str(e))
+    else:
+        # No URL provided - use today's full day
+        w = today_window_utc()
+        print(f"{c_warn('No --dashboard provided')} - collecting all logs for today (UTC)")
 
     _, bench_log, info_json = ensure_local_outputs(experiment)
-    write_info_json(info_json, experiment, dashboard_url, w)
+    write_info_json(info_json, experiment, dashboard_url, w, network)
 
     print(f"{c_label('Experiment')}: {experiment}")
+    print(f"{c_label('Network')}: {network}")
     print(f"{c_label('Time window')}: {to_z(w.start)} .. {to_z(w.end)}")
     
     # Overwrite benchmark.log if exists.
@@ -267,7 +335,7 @@ def main() -> None:
     total_lines = 0
     with bench_log.open("ab") as out_fh:
         for d in w.dates():
-            remote_file = f"{REMOTE_DIR}/devnet_{d.isoformat()}.log"
+            remote_file = f"{remote_dir}/{file_prefix}_{d.isoformat()}.log"
 
             day_start, day_end = day_bounds_utc(d)
             s = max(w.start, day_start)
@@ -282,7 +350,7 @@ def main() -> None:
 
             print(f"  {c_label('•')} {remote_file} {c_warn(f'({s_cmp} .. {e_cmp})')}")
             try:
-                ssh_extract_file(remote_file, s_cmp, e_cmp, out_fh)
+                ssh_extract_file(host, remote_file, s_cmp, e_cmp, out_fh)
             except Exception as ex:
                 die(str(ex))
 
