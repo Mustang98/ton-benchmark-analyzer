@@ -14,8 +14,10 @@ Usage:
 Options:
   --testnet          Collect from testnet logs instead of devnet
   --dashboard URL    Dashboard URL with start/end timestamps
+  --start TS         Start collecting from this ISO timestamp (UTC)
+  --end TS           End collecting at this ISO timestamp (UTC)
 
-If no --dashboard is provided, collects all benchmark logs for today (UTC).
+If no time parameters are provided, collects all benchmark logs for today (UTC).
 """
 
 from __future__ import annotations
@@ -103,10 +105,16 @@ def usage() -> None:
         "  python3 collect_logs.py <experiment_name> [OPTIONS]\n\n"
         "Options:\n"
         "  --testnet          Collect from testnet logs instead of devnet\n"
-        "  --dashboard URL    Dashboard URL with start/end timestamps\n\n"
-        "If no --dashboard is provided, collects all benchmark logs for today (UTC).\n\n"
+        "  --dashboard URL    Dashboard URL with start/end timestamps\n"
+        "  --start TS         Start collecting from this ISO timestamp (UTC)\n"
+        "  --end TS           End collecting at this ISO timestamp (UTC)\n\n"
+        "If no time parameters are provided, collects all benchmark logs for today (UTC).\n"
+        "If only --start is provided, collects from start to end of that day.\n"
+        "If only --end is provided, collects from start of that day to end.\n\n"
         "Examples:\n"
         '  python3 collect_logs.py current_compr --dashboard "http://devnet-01.toncenter.com:8000/?start=2026-01-13T21%3A15%3A33Z&end=2026-01-13T22%3A15%3A42Z"\n'
+        '  python3 collect_logs.py custom_range --start 2026-01-13T21:15:33Z --end 2026-01-13T22:15:42Z\n'
+        '  python3 collect_logs.py from_midday --start 2026-01-13T12:00:00Z\n'
         "  python3 collect_logs.py today_logs\n"
         "  python3 collect_logs.py testnet_today --testnet\n",
         file=sys.stderr,
@@ -194,8 +202,12 @@ def ensure_local_outputs(experiment: str) -> tuple[Path, Path, Path]:
     return exp_dir, bench_log, info_json
 
 
-def write_info_json(info_path: Path, experiment: str, url: str | None, w: Window, network: str = "devnet") -> None:
+def write_info_json(info_path: Path, experiment: str, url: str | None, start_param: str | None, end_param: str | None, w: Window, network: str = "devnet") -> None:
     payload = {"name": experiment, "network": network, "url": url, "start": to_z(w.start), "end": to_z(w.end)}
+    if start_param:
+        payload["start_param"] = start_param
+    if end_param:
+        payload["end_param"] = end_param
     info_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
@@ -276,9 +288,9 @@ def day_bounds_utc(d: date) -> tuple[datetime, datetime]:
 
 
 def main() -> None:
-    if len(sys.argv) < 2:
+    if len(sys.argv) < 2 or "--help" in sys.argv or "-h" in sys.argv:
         usage()
-        sys.exit(1)
+        sys.exit(0 if "--help" in sys.argv or "-h" in sys.argv else 1)
 
     # Parse arguments
     args = sys.argv[1:]
@@ -298,6 +310,28 @@ def main() -> None:
         # Remove both --dashboard and its value
         args.pop(dash_idx + 1)
         args.pop(dash_idx)
+
+    # Extract --start and --end
+    start_time_str: str | None = None
+    end_time_str: str | None = None
+
+    if "--start" in args:
+        start_idx = args.index("--start")
+        if start_idx + 1 >= len(args):
+            die("--start requires a timestamp argument")
+        start_time_str = args[start_idx + 1]
+        # Remove both --start and its value
+        args.pop(start_idx + 1)
+        args.pop(start_idx)
+
+    if "--end" in args:
+        end_idx = args.index("--end")
+        if end_idx + 1 >= len(args):
+            die("--end requires a timestamp argument")
+        end_time_str = args[end_idx + 1]
+        # Remove both --end and its value
+        args.pop(end_idx + 1)
+        args.pop(end_idx)
     
     if not args:
         usage()
@@ -317,16 +351,43 @@ def main() -> None:
             w = parse_dashboard_url(dashboard_url)
         except Exception as e:
             die(str(e))
+    elif start_time_str or end_time_str:
+        # Parse start_time and end_time
+        try:
+            start_dt = parse_iso_utc(start_time_str) if start_time_str else None
+            end_dt = parse_iso_utc(end_time_str) if end_time_str else None
+
+            if start_dt and end_dt:
+                w = Window(start=start_dt, end=end_dt)
+            elif start_dt and not end_dt:
+                # Start time provided but no end time - use to end of day
+                day_start, day_end = day_bounds_utc(start_dt.date())
+                w = Window(start=start_dt, end=day_end)
+            elif end_dt and not start_dt:
+                # End time provided but no start time - use from start of day
+                day_start, day_end = day_bounds_utc(end_dt.date())
+                w = Window(start=day_start, end=end_dt)
+            else:
+                die("Both --start_time and --end_time cannot be empty")
+
+        except Exception as e:
+            die(f"Invalid timestamp: {e}")
     else:
-        # No URL provided - use today's full day
+        # No time parameters provided - use today's full day
         w = today_window_utc()
-        print(f"{c_warn('No --dashboard provided')} - collecting all logs for today (UTC)")
+        print(f"{c_warn('No time parameters provided')} - collecting all logs for today (UTC)")
 
     _, bench_log, info_json = ensure_local_outputs(experiment)
-    write_info_json(info_json, experiment, dashboard_url, w, network)
+    write_info_json(info_json, experiment, dashboard_url, start_time_str, end_time_str, w, network)
 
     print(f"{c_label('Experiment')}: {experiment}")
     print(f"{c_label('Network')}: {network}")
+    if dashboard_url:
+        print(f"{c_label('Source')}: dashboard URL")
+    elif start_time_str or end_time_str:
+        print(f"{c_label('Source')}: direct time parameters")
+    else:
+        print(f"{c_label('Source')}: today's logs")
     print(f"{c_label('Time window')}: {to_z(w.start)} .. {to_z(w.end)}")
     
     # Overwrite benchmark.log if exists.

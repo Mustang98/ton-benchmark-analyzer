@@ -18,7 +18,7 @@ import json
 import re
 import sys
 
-from log_types import LogRecord, record_to_dict, c_label, c_value, c_ok
+from log_types import LogRecord, record_to_dict, extract_short_block_id, c_label, c_value, c_ok
 
 
 BENCHMARK_MARKER = "Broadcast_benchmark"
@@ -38,7 +38,7 @@ _COMPRESSION_RE = re.compile(r"compression=([^\s]+)")
 _ORIGINAL_SIZE_RE = re.compile(r"original_size=(\d+)")
 _COMPRESSED_SIZE_RE = re.compile(r"compressed_size=(\d+)")
 # Match node ID from various formats: devnet-05, ton-tval-12, etc.
-_NODE_RE = re.compile(r"(?:devnet|ton-tval)-(\d+)")
+_NODE_RE = re.compile(r"(devnet-\d+|ton-tval-\d+)")
 
 
 # ---------------------------------------------------------------------------
@@ -110,20 +110,20 @@ def _extract_block_id(line: str) -> str:
     return m.group(1) if m else ""
 
 
-def _extract_node_id(line: str) -> int:
+def _extract_node_id(line: str) -> str:
     """
     Extract node ID from the line prefix.
-    
+
     Supports formats:
-        - 'devnet-05' -> 4 (zero-indexed)
-        - 'ton-tval-12' -> 11 (zero-indexed)
-    
-    Returns -1 if not found.
+        - 'devnet-05' -> "devnet-05"
+        - 'ton-tval-12' -> "ton-tval-12"
+
+    Returns empty string if not found.
     """
     m = _NODE_RE.search(line)
     if m:
-        return int(m.group(1)) - 1  # Convert to 0-indexed
-    return -1
+        return m.group(1)  # Return the full node identifier
+    return ""
 
 
 def _timestamp_to_datetime(ts: str) -> datetime:
@@ -201,7 +201,8 @@ def _parse_line(line: str) -> LogRecord:
         raise ValueError("Missing timestamp in line")
     
     node_id = _extract_node_id(line)
-    block_id = _extract_block_id(line)
+    full_block_id = _extract_block_id(line)
+    block_id = extract_short_block_id(full_block_id)
     raw_type = _extract_type(line)
     stage, log_type = _split_type(raw_type)
     
@@ -232,6 +233,7 @@ def _parse_line(line: str) -> LogRecord:
         start_ts=start_ts,
         end_ts=end_ts,
         block_id=block_id,
+        full_block_id=full_block_id,
         stage=stage,
         type=log_type,
         called_from=called_from,

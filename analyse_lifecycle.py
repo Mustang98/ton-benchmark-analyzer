@@ -8,10 +8,12 @@ Usage:
     python analyse_lifecycle.py <experiment_name> [OPTIONS]
 
 Options:
+    --mode MODE               Analysis mode: 'signatures' (default) or 'slowest'
     --samples [N]            Show N samples per type signature group (default: 1)
-    --limit N                 Only show top N signatures by block count
+    --limit N                 Only show top N signatures by block count (default: all)
     --min-block-size SIZE     Only include blocks >= SIZE bytes (e.g. 100000 or 100K)
     --max-block-size SIZE     Only include blocks <= SIZE bytes (e.g. 100000 or 100K)
+    --skip-block-full         Skip all records with type 'block_full'
 """
 
 from datetime import datetime
@@ -89,7 +91,7 @@ def print_block_lifecycle(block_id: str, records: List[LogRecord]) -> None:
     # Use this block's first event as the origin
     origin_ts = min(r.start_ts for r in records)
     
-    print(f"\n{c_label('Block:')} {c_value(block_id[:40])}{'...' if len(block_id) > 40 else ''}")
+    print(f"\n{c_label('Block:')} {c_value(block_id)} { 'size:'} {c_value(get_block_size(records))}")
     print(f"  {c_dim('Total events:')} {len(records)}")
     
     # Count by stage and type
@@ -105,7 +107,8 @@ def print_block_lifecycle(block_id: str, records: List[LogRecord]) -> None:
     print(f"  {c_dim('Stages:')} {', '.join(f'{k}={v}' for k, v in sorted(stage_counts.items()))}")
     print(f"  {c_dim('Types:')} {', '.join(f'{k}={v}' for k, v in sorted(type_counts.items()))}")
     print(f"  {c_dim('Nodes involved:')} {len(node_set)}")
-    
+    print(f"  {c_dim('Started at:')} {origin_ts.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
+
     # Timeline
     print(f"  {c_dim('Timeline:')}")
     for i, rec in enumerate(records):
@@ -123,7 +126,7 @@ def print_block_lifecycle(block_id: str, records: List[LogRecord]) -> None:
         print(
             f"    {i+1:3d}. "
             f"[{rel_start:+8.3f}s -> {rel_end:+8.3f}s] "
-            f"node={rec.node_id:2d} "
+            f"node={rec.node_id:<12s} "
             f"{stage_str:<20s} "
             f"{rec.type}{called_from_str}"
         )
@@ -228,6 +231,58 @@ def load_records_from_json(experiment_name: str, base_dir: str = "logs") -> List
     return [dict_to_record(d) for d in data["records"]]
 
 
+def print_slowest_blocks(
+    records: List[LogRecord],
+    limit: Optional[int] = None,
+) -> None:
+    """
+    Show the slowest blocks by total duration (first event start to last event end).
+
+    Args:
+        records: All log records (should be pre-filtered)
+        limit: Maximum number of blocks to show (None = show all)
+    """
+    grouped = group_records_by_block_id(records)
+
+    if not grouped:
+        print(f"{c_warn('No blocks found')}")
+        return
+
+    # Calculate duration for each block
+    block_durations = []
+    for block_id, block_records in grouped.items():
+        if not block_records:
+            continue
+
+        # Sort records by start time
+        sorted_records = sorted(block_records, key=lambda r: r.start_ts)
+
+        # Calculate total duration from first start to last end
+        first_start = sorted_records[0].start_ts
+        last_end = max(r.end_ts for r in sorted_records)
+        total_duration = (last_end - first_start).total_seconds()
+
+        block_durations.append((block_id, sorted_records, total_duration))
+
+    # Sort by duration (slowest first)
+    block_durations.sort(key=lambda x: x[2], reverse=True)
+
+    # Apply limit if specified
+    if limit is not None and limit > 0:
+        block_durations = block_durations[:limit]
+
+    print(f"\n{'='*80}")
+    print(f"{c_label('SLOWEST BLOCKS BY TOTAL DURATION')}")
+    print(f"{'='*80}")
+    print(f"  {c_dim('Total blocks analyzed:')} {len(grouped)}")
+    print(f"  {c_dim('Showing top:')} {len(block_durations)}")
+
+    for i, (block_id, block_records, duration) in enumerate(block_durations, 1):
+        print(f"\n{'-'*80}")
+        print(f"{c_label(f'#{i} Slowest Block')} - {c_value(f'{duration:.3f}s total')}")
+        print_block_lifecycle(block_id, block_records)
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -237,11 +292,12 @@ def main() -> None:
     if len(sys.argv) < 2:
         print("Usage: python analyse_lifecycle.py <experiment_name> [OPTIONS]")
         print("Options:")
-        print("  --lifecycle [N]           Show N block lifecycles (default: 5)")
-        print("  --lifecycle-by-sig [N]    Group lifecycles by type signature, show N samples per group (default: 1)")
-        print("  --limit N                 Only show top N signatures by block count")
+        print("  --mode MODE               Analysis mode: 'signatures' (default) or 'slowest'")
+        print("  --samples [N]            Show N samples per type signature group (default: 1)")
+        print("  --limit N                 Only show top N results (signatures or slowest blocks)")
         print("  --min-block-size SIZE     Only include blocks >= SIZE bytes (e.g. 100000 or 100K)")
         print("  --max-block-size SIZE     Only include blocks <= SIZE bytes (e.g. 100000 or 100K)")
+        print("  --skip-block-full         Skip all records with type 'block_full'")
         sys.exit(1)
 
     experiment_name = sys.argv[1]
@@ -273,6 +329,19 @@ def main() -> None:
         size_idx = sys.argv.index("--max-block-size")
         if size_idx + 1 < len(sys.argv):
             max_block_size = parse_size_arg(sys.argv[size_idx + 1])
+
+    # Check for --skip-block-full flag
+    skip_block_full = "--skip-block-full" in sys.argv
+
+    # Check for --mode flag
+    mode = "signatures"  # default mode
+    if "--mode" in sys.argv:
+        mode_idx = sys.argv.index("--mode")
+        if mode_idx + 1 < len(sys.argv):
+            mode = sys.argv[mode_idx + 1]
+            if mode not in ("signatures", "slowest"):
+                print(f"Error: Invalid mode '{mode}'. Must be 'signatures' or 'slowest'")
+                sys.exit(1)
     
     print(f"{c_label('Experiment:')} {c_value(experiment_name)}")
 
@@ -288,9 +357,19 @@ def main() -> None:
         if max_block_size > 0:
             size_filter_msg.append(f"<= {size_to_k_suffix(max_block_size)}")
         print(f"{c_label('Records after size filter')} ({', '.join(size_filter_msg)}): {c_value(str(len(records)))}")
+
+    # Filter out block_full records if requested
+    if skip_block_full:
+        original_count = len(records)
+        records = [r for r in records if r.type != "block_full"]
+        skipped_count = original_count - len(records)
+        print(f"{c_label('Records after skipping block_full')}: {c_value(str(len(records)))} {c_dim(f'(skipped {skipped_count} block_full records)')}")
     
-    # Show lifecycles grouped by type signature
-    print_lifecycles_by_type_signature(records, show_sample_per_group=samples_per_sig, min_events=2, limit=sig_limit)
+    # Show results based on mode
+    if mode == "signatures":
+        print_lifecycles_by_type_signature(records, show_sample_per_group=samples_per_sig, min_events=2, limit=sig_limit)
+    elif mode == "slowest":
+        print_slowest_blocks(records, limit=sig_limit)
 
 
 if __name__ == "__main__":

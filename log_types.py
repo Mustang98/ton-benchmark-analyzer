@@ -63,10 +63,11 @@ def c_dim(text: str) -> str:
 
 @dataclass
 class LogRecord:
-    node_id: int              # 0–23
+    node_id: str             # Node identifier as found in logs 
     start_ts: datetime        # START timestamp of the operation (end_ts - duration)
     end_ts: datetime          # END timestamp of the operation (from log line)
-    block_id: str
+    block_id: str             # Short block ID (extracted from full_block_id)
+    full_block_id: str        # Original full block ID as found in logs
     stage: str                # compress or decompress
     type: str                 # normalized logical type (e.g. candidate, block_full)
     called_from: Optional[str]  # public, fast-sync, validator_session, etc.
@@ -95,6 +96,7 @@ def dict_to_record(d: dict) -> LogRecord:
         start_ts=datetime.fromisoformat(d["start_ts"]),
         end_ts=datetime.fromisoformat(d["end_ts"]),
         block_id=d["block_id"],
+        full_block_id=d.get("full_block_id", d["block_id"]),  # Backward compatibility
         stage=d["stage"],
         type=d["type"],
         called_from=d.get("called_from"),
@@ -123,6 +125,31 @@ def parse_size_arg(size_str: str) -> int:
 def size_to_k_suffix(size_bytes: int) -> str:
     """Convert size in bytes to a K suffix string (e.g., 60228 -> '60K')."""
     return f"{round(size_bytes / 1000)}K"
+
+
+def extract_short_block_id(full_block_id: str) -> str:
+    """
+    Extract the short block ID from a full block ID.
+
+    For candidate-like IDs (simple hex strings), return as-is.
+    For complex IDs with format "(...):HEX1:HEX2", return HEX1 (the middle part).
+
+    Examples:
+        "ABC123..." -> "ABC123..."  # candidate-like
+        "(0,8000000000000000,123):DEF456...:GHI789..." -> "DEF456..."  # complex format
+    """
+    if not full_block_id:
+        return full_block_id
+
+    # Check if it's a complex format with colons
+    if ':' in full_block_id:
+        parts = full_block_id.split(':')
+        if len(parts) >= 2:
+            # Return the middle part (between first and second colon)
+            return parts[1]
+
+    # For simple hex strings or other formats, return as-is
+    return full_block_id
 
 
 # ---------------------------------------------------------------------------
