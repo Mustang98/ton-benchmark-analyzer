@@ -19,6 +19,7 @@ Options:
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
+import argparse
 import json
 import sys
 
@@ -289,59 +290,71 @@ def print_slowest_blocks(
 
 def main() -> None:
     """Analyze block lifecycles from records.json."""
-    if len(sys.argv) < 2:
-        print("Usage: python analyse_lifecycle.py <experiment_name> [OPTIONS]")
-        print("Options:")
-        print("  --mode MODE               Analysis mode: 'signatures' (default) or 'slowest'")
-        print("  --samples [N]            Show N samples per type signature group (default: 1)")
-        print("  --limit N                 Only show top N results (signatures or slowest blocks)")
-        print("  --min-block-size SIZE     Only include blocks >= SIZE bytes (e.g. 100000 or 100K)")
-        print("  --max-block-size SIZE     Only include blocks <= SIZE bytes (e.g. 100000 or 100K)")
-        print("  --skip-block-full         Skip all records with type 'block_full'")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(
+        description="Analyze block lifecycles from records.json.",
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+    parser.add_argument("experiment_name", help="Experiment directory under logs/")
+    parser.add_argument(
+        "--mode",
+        choices=("signatures", "slowest"),
+        default="signatures",
+        help="Analysis mode: signatures (default) or slowest",
+    )
+    parser.add_argument(
+        "--samples",
+        nargs="?",
+        const=1,
+        default=1,
+        type=int,
+        help="Show N samples per type signature group (default: 1)",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        help="Only show top N results (signatures or slowest blocks)",
+    )
+    parser.add_argument(
+        "--min-block-size",
+        help="Only include blocks >= SIZE bytes (e.g. 100000 or 100K)",
+    )
+    parser.add_argument(
+        "--max-block-size",
+        help="Only include blocks <= SIZE bytes (e.g. 100000 or 100K)",
+    )
+    parser.add_argument(
+        "--skip-block-full",
+        action="store_true",
+        help="Skip all records with type 'block_full'",
+    )
 
-    experiment_name = sys.argv[1]
+    args = parser.parse_args()
 
-    # Check for --samples flag
-    samples_per_sig = 1
-    if "--samples" in sys.argv:
-        sig_idx = sys.argv.index("--samples")
-        if sig_idx + 1 < len(sys.argv) and sys.argv[sig_idx + 1].isdigit():
-            samples_per_sig = int(sys.argv[sig_idx + 1])
+    experiment_name = args.experiment_name
+    samples_per_sig = args.samples
+    sig_limit = args.limit
+    skip_block_full = args.skip_block_full
+    mode = args.mode
 
-    # Check for --limit flag
-    sig_limit: Optional[int] = None
-    if "--limit" in sys.argv:
-        limit_idx = sys.argv.index("--limit")
-        if limit_idx + 1 < len(sys.argv) and sys.argv[limit_idx + 1].isdigit():
-            sig_limit = int(sys.argv[limit_idx + 1])
+    if samples_per_sig < 0:
+        parser.error("--samples must be >= 0")
+    if sig_limit is not None and sig_limit <= 0:
+        parser.error("--limit must be > 0")
 
-    # Check for --min-block-size flag
     min_block_size = 0
-    if "--min-block-size" in sys.argv:
-        size_idx = sys.argv.index("--min-block-size")
-        if size_idx + 1 < len(sys.argv):
-            min_block_size = parse_size_arg(sys.argv[size_idx + 1])
-
-    # Check for --max-block-size flag
     max_block_size = 0
-    if "--max-block-size" in sys.argv:
-        size_idx = sys.argv.index("--max-block-size")
-        if size_idx + 1 < len(sys.argv):
-            max_block_size = parse_size_arg(sys.argv[size_idx + 1])
-
-    # Check for --skip-block-full flag
-    skip_block_full = "--skip-block-full" in sys.argv
-
-    # Check for --mode flag
-    mode = "signatures"  # default mode
-    if "--mode" in sys.argv:
-        mode_idx = sys.argv.index("--mode")
-        if mode_idx + 1 < len(sys.argv):
-            mode = sys.argv[mode_idx + 1]
-            if mode not in ("signatures", "slowest"):
-                print(f"Error: Invalid mode '{mode}'. Must be 'signatures' or 'slowest'")
-                sys.exit(1)
+    if args.min_block_size:
+        try:
+            min_block_size = parse_size_arg(args.min_block_size)
+        except Exception as exc:
+            parser.error(f"invalid --min-block-size: {exc}")
+    if args.max_block_size:
+        try:
+            max_block_size = parse_size_arg(args.max_block_size)
+        except Exception as exc:
+            parser.error(f"invalid --max-block-size: {exc}")
+    if min_block_size > 0 and max_block_size > 0 and min_block_size > max_block_size:
+        parser.error("--min-block-size cannot be greater than --max-block-size")
     
     print(f"{c_label('Experiment:')} {c_value(experiment_name)}")
 

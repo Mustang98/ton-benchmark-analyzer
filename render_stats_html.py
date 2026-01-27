@@ -12,6 +12,7 @@ Outputs:
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict, List
@@ -49,7 +50,7 @@ def build_html(title: str, experiments: List[Dict[str, Any]]) -> str:
 
     # Short experiment names (first token of filename stem)
     exp_short_names: List[str] = [
-        (Path(exp["path"]).stem.split("_")[0] if "path" in exp else str(exp["name"]).split("_")[0])
+        (Path(exp["path"]).stem if "path" in exp else str(exp["name"]))
         for exp in experiments
     ]
 
@@ -71,6 +72,7 @@ def build_html(title: str, experiments: List[Dict[str, Any]]) -> str:
         meta = union_map[k]
         entry = {
             "label": meta["label"],
+            "block_size_by_id_series": [],
             "block_size_series": [],
             "compression_percent_series": [],
             "broadcast_time_avg_series": [],
@@ -85,7 +87,16 @@ def build_html(title: str, experiments: List[Dict[str, Any]]) -> str:
             tos: Dict[str, Dict[str, Any]] = exp["stats"].get("type_called_from_stats", {})
             pair = tos.get(k)
             if not pair:
+                entry["block_size_by_id_series"].append({})
+                entry["block_size_series"].append({"name": exp_name, "base_ts": base_ts, "points": []})
+                entry["compression_percent_series"].append({"name": exp_name, "base_ts": base_ts, "points": []})
+                entry["broadcast_time_avg_series"].append({"name": exp_name, "base_ts": base_ts, "points": []})
+                entry["broadcast_time_full_series"].append({"name": exp_name, "base_ts": base_ts, "points": []})
+                entry["broadcast_time_66p_series"].append({"name": exp_name, "base_ts": base_ts, "points": []})
+                entry["compression_time_series"].append({"name": exp_name, "base_ts": base_ts, "points": []})
+                entry["decompression_time_series"].append({"name": exp_name, "base_ts": base_ts, "points": []})
                 continue
+            entry["block_size_by_id_series"].append(pair.get("block_size_by_id", {}))
             entry["block_size_series"].append({"name": exp_name, "base_ts": base_ts, "points": pair.get("block_size_points", [])})
             entry["compression_percent_series"].append({"name": exp_name, "base_ts": base_ts, "points": pair.get("compression_percent_points", [])})
             entry["broadcast_time_avg_series"].append({"name": exp_name, "base_ts": base_ts, "points": pair.get("broadcast_time_avg_points", [])})
@@ -277,11 +288,14 @@ def build_html(title: str, experiments: List[Dict[str, Any]]) -> str:
     html += '<div class="card"><h2 style="margin-top:0">Details</h2>'
     # Smoothing controls
     html += """
-    <div style="display:flex; align-items:center; gap:12px; margin:8px 0 12px 0;">
+    <div style="display:flex; align-items:center; gap:12px; margin:8px 0 12px 0; flex-wrap:wrap;">
       <label for="smooth-range" style="min-width: 220px;">Averaging window (seconds)</label>
       <input id="smooth-range" type="range" min="0" max="600" step="1" value="100" />
       <input id="smooth-number" type="number" min="0" max="600" step="1" value="100" style="width:80px;" />
       <span style="color:#6b7280;">0 = show all raw points</span>
+      <label for="block-size-range" style="min-width: 220px; margin-left:16px;">Min block size (KB)</label>
+      <input id="block-size-range" type="range" min="0" max="0" step="1" value="0" />
+      <input id="block-size-number" type="number" min="0" max="0" step="1" value="0" style="width:80px;" />
       <label style="margin-left:16px; display:flex; align-items:center; gap:8px;">
         <input id="trim-edges" type="checkbox" checked />
         <span>Trim first 5 min and last 2 min</span>
@@ -333,6 +347,8 @@ def build_html(title: str, experiments: List[Dict[str, Any]]) -> str:
     html += r"""
 let averagingWindowSec = 60; // default 1 minute
 let trimEdges = true; // default trim enabled
+let minBlockSizeBytes = 0; // 0 = no filter
+const USE_ABSOLUTE_TIME = EXP_SHORT_NAMES.length === 1;
 
 // Timeline range (in data coordinates - seconds from start)
 let globalMinT = Infinity;
@@ -341,10 +357,13 @@ let rangeMinT = 0;  // current left bound
 let rangeMaxT = 0;  // current right bound
 let globalBaseTsMs = null;  // base timestamp in milliseconds for converting to actual dates
 
+let globalMinBlockSize = Infinity;
+let globalMaxBlockSize = -Infinity;
+
 // Compute global time range from all data
 function computeGlobalTimeRange() {
   let earliestAbsoluteMs = Infinity;
-  
+
   for (const key of Object.keys(PLOTS_DATA)) {
     const item = PLOTS_DATA[key];
     const allSeries = [
@@ -357,24 +376,57 @@ function computeGlobalTimeRange() {
       ...(item.decompression_time_series || []),
     ];
     for (const s of allSeries) {
-      // Track the base timestamp that produces the earliest absolute time
-      const baseMs = s.base_ts ? new Date(s.base_ts).getTime() : 0;
+      const baseMs = USE_ABSOLUTE_TIME && s.base_ts ? new Date(s.base_ts).getTime() : 0;
       for (const [t, _] of (s.points || [])) {
         if (t < globalMinT) globalMinT = t;
         if (t > globalMaxT) globalMaxT = t;
-        const absMs = baseMs + t * 1000;
-        if (absMs < earliestAbsoluteMs) {
-          earliestAbsoluteMs = absMs;
-          globalBaseTsMs = baseMs;
+        if (USE_ABSOLUTE_TIME) {
+          const absMs = baseMs + t * 1000;
+          if (absMs < earliestAbsoluteMs) {
+            earliestAbsoluteMs = absMs;
+            globalBaseTsMs = baseMs;
+          }
         }
       }
     }
   }
   if (globalMinT === Infinity) globalMinT = 0;
   if (globalMaxT === -Infinity) globalMaxT = 1;
-  if (globalBaseTsMs === null) globalBaseTsMs = 0;
+  if (USE_ABSOLUTE_TIME && globalBaseTsMs === null) globalBaseTsMs = 0;
   rangeMinT = globalMinT;
   rangeMaxT = globalMaxT;
+}
+
+function computeGlobalBlockSizeRange() {
+  globalMinBlockSize = Infinity;
+  globalMaxBlockSize = -Infinity;
+  for (const key of Object.keys(PLOTS_DATA)) {
+    const item = PLOTS_DATA[key];
+    for (const s of (item.block_size_series || [])) {
+      for (const p of (s.points || [])) {
+        const size = p[1];
+        if (typeof size !== 'number') continue;
+        if (size < globalMinBlockSize) globalMinBlockSize = size;
+        if (size > globalMaxBlockSize) globalMaxBlockSize = size;
+      }
+    }
+  }
+  if (globalMinBlockSize === Infinity) globalMinBlockSize = 0;
+  if (globalMaxBlockSize === -Infinity) globalMaxBlockSize = 0;
+}
+
+function hasBlocksAfterSizeFilter(item) {
+  if (!item) return false;
+  if (!minBlockSizeBytes || minBlockSizeBytes <= 0) {
+    return (item.block_size_series || []).some(s => (s.points || []).length > 0);
+  }
+  return (item.block_size_series || []).some(s =>
+    (s.points || []).some(p => typeof p[1] === 'number' && p[1] >= minBlockSizeBytes),
+  );
+}
+
+function getVisibleUnionKeys() {
+  return UNION_KEYS.filter(k => hasBlocksAfterSizeFilter(PLOTS_DATA[k]));
 }
 
 function formatDuration(seconds) {
@@ -387,7 +439,7 @@ function formatDuration(seconds) {
 }
 
 function secsToTimestamp(secs) {
-  if (globalBaseTsMs === null) return formatDuration(secs);
+  if (!USE_ABSOLUTE_TIME || globalBaseTsMs === null) return formatDuration(secs);
   const d = new Date(globalBaseTsMs + secs * 1000);
   // Format as HH:MM:SS
   const hh = String(d.getHours()).padStart(2, '0');
@@ -397,8 +449,10 @@ function secsToTimestamp(secs) {
 }
 
 function updateTimelineLabels() {
-  document.getElementById('timeline-label-left').textContent = secsToTimestamp(rangeMinT);
-  document.getElementById('timeline-label-right').textContent = secsToTimestamp(rangeMaxT);
+  const leftVal = USE_ABSOLUTE_TIME ? secsToTimestamp(rangeMinT) : formatDuration(rangeMinT);
+  const rightVal = USE_ABSOLUTE_TIME ? secsToTimestamp(rangeMaxT) : formatDuration(rangeMaxT);
+  document.getElementById('timeline-label-left').textContent = leftVal;
+  document.getElementById('timeline-label-right').textContent = rightVal;
   document.getElementById('timeline-duration').textContent = formatDuration(rangeMaxT - rangeMinT);
 }
 
@@ -495,9 +549,25 @@ function setupTimelineDrag() {
   });
 }
 
-function aggregatePoints(points, windowSec) {
+function filterByBlockSize(points, blockSizeById) {
+  if (!minBlockSizeBytes || minBlockSizeBytes <= 0) return points;
   if (!points || points.length === 0) return [];
-  const sorted = points.slice().sort((a,b) => a[0] - b[0]);
+  const out = [];
+  for (const p of points) {
+    const blockId = p[2];
+    const size = blockSizeById ? blockSizeById[blockId] : null;
+    if (typeof size === 'number' && size >= minBlockSizeBytes) {
+      out.push(p);
+    }
+  }
+  return out;
+}
+
+function aggregatePoints(points, windowSec, blockSizeById) {
+  if (!points || points.length === 0) return [];
+  const sizeFiltered = filterByBlockSize(points, blockSizeById);
+  if (sizeFiltered.length === 0) return [];
+  const sorted = sizeFiltered.slice().sort((a,b) => a[0] - b[0]);
   
   // Apply timeline range filter first
   const rangeFiltered = sorted.filter(([t,_]) => t >= rangeMinT && t <= rangeMaxT);
@@ -538,10 +608,12 @@ function aggregatePoints(points, windowSec) {
 
 // Compute averages for a (type, called_from) pair within current time range
 function computeAveragesForPair(pairData) {
+  const blockSizeById = pairData.block_size_by_id || {};
   function avgFromPoints(pointsKey) {
     const pts = pairData[pointsKey] || [];
+    const sizeFiltered = filterByBlockSize(pts, blockSizeById);
     // Filter by timeline range
-    const filtered = pts.filter(([t,_]) => t >= rangeMinT && t <= rangeMaxT);
+    const filtered = sizeFiltered.filter(([t,_]) => t >= rangeMinT && t <= rangeMaxT);
     if (filtered.length === 0) return 0;
     const sum = filtered.reduce((acc, [_,v]) => acc + v, 0);
     return sum / filtered.length;
@@ -549,7 +621,8 @@ function computeAveragesForPair(pairData) {
   
   function countFromPoints(pointsKey) {
     const pts = pairData[pointsKey] || [];
-    return pts.filter(([t,_]) => t >= rangeMinT && t <= rangeMaxT).length;
+    const sizeFiltered = filterByBlockSize(pts, blockSizeById);
+    return sizeFiltered.filter(([t,_]) => t >= rangeMinT && t <= rangeMaxT).length;
   }
   
   return {
@@ -569,13 +642,18 @@ function rebuildAveragesTable() {
   
   let html = '<table><thead><tr><th>Parameter</th>';
   // Header row 1: (type, called_from) groups
-  for (const k of UNION_KEYS) {
+  const visibleKeys = getVisibleUnionKeys();
+  if (visibleKeys.length === 0) {
+    container.innerHTML = '<div style="color:#6b7280;">No blocks match the current size filter.</div>';
+    return;
+  }
+  for (const k of visibleKeys) {
     const label = UNION_MAP[k].label;
     html += `<th class="group-start" colspan="${EXP_SHORT_NAMES.length}">${label}</th>`;
   }
   html += '</tr><tr><th></th>';
   // Header row 2: experiment names
-  for (const _ of UNION_KEYS) {
+  for (const _ of visibleKeys) {
     for (let i = 0; i < EXP_SHORT_NAMES.length; i++) {
       const cls = i === 0 ? ' class="group-start"' : '';
       html += `<th${cls}>${EXP_SHORT_NAMES[i]}</th>`;
@@ -585,7 +663,7 @@ function rebuildAveragesTable() {
   
   // Compute all averages first
   const allAvgs = {};  // allAvgs[unionKey][expIdx] = avgMap
-  for (const k of UNION_KEYS) {
+  for (const k of visibleKeys) {
     allAvgs[k] = [];
     const item = PLOTS_DATA[k];
     if (!item) {
@@ -603,6 +681,7 @@ function rebuildAveragesTable() {
         broadcast_time_66p_points: item.broadcast_time_66p_series[expIdx]?.points || [],
         compression_time_points: item.compression_time_series[expIdx]?.points || [],
         decompression_time_points: item.decompression_time_series[expIdx]?.points || [],
+        block_size_by_id: item.block_size_by_id_series[expIdx] || {},
       };
       const avgMap = computeAveragesForPair(pairData);
       allAvgs[k].push(avgMap);
@@ -613,7 +692,7 @@ function rebuildAveragesTable() {
   for (const [keyName, rowLabel] of ROWS_SPEC) {
     html += `<tr><td>${rowLabel}</td>`;
     
-    for (const k of UNION_KEYS) {
+    for (const k of visibleKeys) {
       // Gather values for this pair across experiments
       const groupVals = allAvgs[k].map(avg => avg ? avg[keyName] : null);
       
@@ -682,6 +761,7 @@ function rebuildAveragesTable() {
 
 function rebuildAll() {
   rebuildAveragesTable();
+  updateVisibleTabs();
   const active = document.querySelector('.tab-btn.active');
   if (active) {
     renderTab(active.dataset.tab);
@@ -695,21 +775,26 @@ function secsToDate(baseTsStr, secs) {
   return new Date(baseMs + secs * 1000);
 }
 
-function plotSeriesMulti(divId, title, xLabel, yLabel, seriesList, yTickFormat = null, valueScale = 1.0) {
+function plotSeriesMulti(divId, title, xLabel, yLabel, seriesList, blockSizeByIdSeries, yTickFormat = null, valueScale = 1.0) {
   const traces = [];
-  for (const s of (seriesList || [])) {
+  const series = seriesList || [];
+  for (let idx = 0; idx < series.length; idx++) {
+    const s = series[idx];
+    const blockSizeById = (blockSizeByIdSeries || [])[idx] || {};
     const ptsRaw = Array.isArray(s.points) ? s.points : [];
-    const scaled = (valueScale === 1.0) ? ptsRaw : ptsRaw.map(p => [p[0], p[1] * valueScale]);
-    const pts = aggregatePoints(scaled, averagingWindowSec);
-    // Convert seconds to actual timestamps using base_ts
-    const x = pts.map(p => secsToDate(s.base_ts, p[0]));
+    const scaled = (valueScale === 1.0) ? ptsRaw : ptsRaw.map(p => [p[0], p[1] * valueScale, p[2]]);
+    const pts = aggregatePoints(scaled, averagingWindowSec, blockSizeById);
+    // Convert seconds to actual timestamps using base_ts if single experiment
+    const x = USE_ABSOLUTE_TIME
+      ? pts.map(p => secsToDate(s.base_ts, p[0]))
+      : pts.map(p => p[0]);
     const y = pts.map(p => p[1]);
     traces.push({ x, y, type: 'scatter', mode: 'lines', name: s.name, line: { width: 2 } });
   }
   const layout = {
     title: title,
     margin: {l: 50, r: 20, t: 40, b: 60},
-    xaxis: { title: xLabel, type: 'date' },
+    xaxis: USE_ABSOLUTE_TIME ? { title: xLabel, type: 'date' } : { title: xLabel },
     yaxis: { title: yLabel, rangemode: 'tozero' },
   };
   if (yTickFormat) { layout.yaxis.tickformat = yTickFormat; }
@@ -719,13 +804,37 @@ function plotSeriesMulti(divId, title, xLabel, yLabel, seriesList, yTickFormat =
 function renderTab(key) {
   const item = PLOTS_DATA[key];
   if (!item) return;
-  plotSeriesMulti(`${key}-block_size`, `${item.label} - Block size`, "time", "size (bytes)", item.block_size_series);
-  plotSeriesMulti(`${key}-compression_percent`, `${item.label} - Compression %`, "time", "percent", item.compression_percent_series, '.2f', 100.0);
-  plotSeriesMulti(`${key}-broadcast_avg`, `${item.label} - Broadcast (avg)`, "time", "seconds", item.broadcast_time_avg_series, '.2f');
-  plotSeriesMulti(`${key}-broadcast_66p`, `${item.label} - Broadcast (66p)`, "time", "seconds", item.broadcast_time_66p_series, '.2f');
-  plotSeriesMulti(`${key}-broadcast_full`, `${item.label} - Broadcast (full)`, "time", "seconds", item.broadcast_time_full_series, '.2f');
-  plotSeriesMulti(`${key}-compression_time`, `${item.label} - Compression time`, "time", "milliseconds", item.compression_time_series, '.2f', 1000.0);
-  plotSeriesMulti(`${key}-decompression_time`, `${item.label} - Decompression time`, "time", "milliseconds", item.decompression_time_series, '.2f', 1000.0);
+  if (!hasBlocksAfterSizeFilter(item)) return;
+  const blockSizeByIdSeries = item.block_size_by_id_series || [];
+  plotSeriesMulti(`${key}-block_size`, `${item.label} - Block size`, "time", "size (bytes)", item.block_size_series, blockSizeByIdSeries);
+  plotSeriesMulti(`${key}-compression_percent`, `${item.label} - Compression %`, "time", "percent", item.compression_percent_series, blockSizeByIdSeries, '.2f', 100.0);
+  plotSeriesMulti(`${key}-broadcast_avg`, `${item.label} - Broadcast (avg)`, "time", "seconds", item.broadcast_time_avg_series, blockSizeByIdSeries, '.2f');
+  plotSeriesMulti(`${key}-broadcast_66p`, `${item.label} - Broadcast (66p)`, "time", "seconds", item.broadcast_time_66p_series, blockSizeByIdSeries, '.2f');
+  plotSeriesMulti(`${key}-broadcast_full`, `${item.label} - Broadcast (full)`, "time", "seconds", item.broadcast_time_full_series, blockSizeByIdSeries, '.2f');
+  plotSeriesMulti(`${key}-compression_time`, `${item.label} - Compression time`, "time", "milliseconds", item.compression_time_series, blockSizeByIdSeries, '.2f', 1000.0);
+  plotSeriesMulti(`${key}-decompression_time`, `${item.label} - Decompression time`, "time", "milliseconds", item.decompression_time_series, blockSizeByIdSeries, '.2f', 1000.0);
+}
+
+function updateVisibleTabs() {
+  const visibleKeys = new Set(getVisibleUnionKeys());
+  let firstVisible = null;
+  document.querySelectorAll('.tab-btn').forEach(btn => {
+    const isVisible = visibleKeys.has(btn.dataset.tab);
+    btn.style.display = isVisible ? '' : 'none';
+    if (isVisible && !firstVisible) firstVisible = btn.dataset.tab;
+  });
+  document.querySelectorAll('.tab-content').forEach(div => {
+    const key = div.id.replace('tab-', '');
+    const isVisible = visibleKeys.has(key);
+    div.style.display = isVisible ? '' : 'none';
+  });
+  const active = document.querySelector('.tab-btn.active');
+  if (!active || !visibleKeys.has(active.dataset.tab)) {
+    if (firstVisible) {
+      setActiveTab(firstVisible);
+      renderTab(firstVisible);
+    }
+  }
 }
 
 function setActiveTab(key) {
@@ -748,6 +857,8 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
 // Controls
 const smoothRange = document.getElementById('smooth-range');
 const smoothNumber = document.getElementById('smooth-number');
+const blockSizeRange = document.getElementById('block-size-range');
+const blockSizeNumber = document.getElementById('block-size-number');
 const trimCheckbox = document.getElementById('trim-edges');
 function applyAveragingChange(val) {
   const v = Math.max(0, Math.min(600, Number(val) || 0));
@@ -762,6 +873,16 @@ function applyAveragingChange(val) {
 }
 smoothRange.addEventListener('input', e => applyAveragingChange(e.target.value));
 smoothNumber.addEventListener('change', e => applyAveragingChange(e.target.value));
+function applyBlockSizeChange(val) {
+  const maxKb = Math.max(0, Number(blockSizeRange.max) || 0);
+  const v = Math.max(0, Math.min(maxKb, Number(val) || 0));
+  minBlockSizeBytes = Math.round(v * 1024);
+  blockSizeRange.value = String(v);
+  blockSizeNumber.value = String(v);
+  rebuildAll();
+}
+blockSizeRange.addEventListener('input', e => applyBlockSizeChange(e.target.value));
+blockSizeNumber.addEventListener('change', e => applyBlockSizeChange(e.target.value));
 trimCheckbox.addEventListener('change', e => {
   trimEdges = !!e.target.checked;
   const active = document.querySelector('.tab-btn.active');
@@ -771,8 +892,14 @@ trimCheckbox.addEventListener('change', e => {
   }
 });
 
-// Initialize timeline
+// Initialize timeline and block size slider
 computeGlobalTimeRange();
+computeGlobalBlockSizeRange();
+const maxKb = Math.ceil(globalMaxBlockSize / 1024);
+blockSizeRange.max = String(maxKb);
+blockSizeNumber.max = String(maxKb);
+blockSizeRange.value = "0";
+blockSizeNumber.value = "0";
 setupTimelineDrag();
 updateTimelineHandles();
 
@@ -850,6 +977,16 @@ def main() -> None:
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(html)
     print(f"Wrote HTML report to {out_path}")
+    
+    # Open the HTML file with the default application
+    try:
+        subprocess.run(["open", str(out_path)], check=True)
+        print(f"Opened {out_path} in default browser")
+    except subprocess.CalledProcessError:
+        print(f"Failed to open {out_path}")
+    except FileNotFoundError:
+        # 'open' command not available (not on macOS)
+        print("Note: 'open' command not available on this system")
 
 
 if __name__ == "__main__":

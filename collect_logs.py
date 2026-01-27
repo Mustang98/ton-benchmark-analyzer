@@ -287,6 +287,16 @@ def day_bounds_utc(d: date) -> tuple[datetime, datetime]:
     return start, end
 
 
+def run_parse_logs(experiment: str) -> None:
+    parse_script = Path(__file__).resolve().parent / "parse_logs.py"
+    proc = subprocess.run(
+        [sys.executable, str(parse_script), experiment],
+        check=False,
+    )
+    if proc.returncode != 0:
+        die(f"parse_logs.py failed with exit code {proc.returncode}")
+
+
 def main() -> None:
     if len(sys.argv) < 2 or "--help" in sys.argv or "-h" in sys.argv:
         usage()
@@ -422,6 +432,7 @@ def main() -> None:
         total_lines = -1
 
     print(f"{c_ok('Done')}. {c_label('Lines')}: {total_lines}")
+    run_parse_logs(experiment)
 
 
 if __name__ == "__main__":

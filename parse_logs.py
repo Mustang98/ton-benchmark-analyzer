@@ -1,11 +1,11 @@
 """
-Parse benchmark logs from an experiment directory.
+Parse benchmark logs from experiment directories.
 
-Reads the single benchmark.log file from logs/<experiment>/ and, for each
-Broadcast_benchmark record, extracts structured data and writes to records.json.
+Reads benchmark.log files and extracts structured data to records.json.
 
 Usage:
-    python parse_logs.py <experiment_name>
+    python parse_logs.py <experiment_name>    # Parse single experiment
+    python parse_logs.py                      # Parse all experiments (generate missing records.json)
 
 Output:
     logs/<experiment_name>/records.json
@@ -91,6 +91,8 @@ def _split_type(raw_type: Optional[str]) -> tuple[Optional[str], Optional[str]]:
         return None, raw_type
 
     logical_type = "_".join(rest_parts) if rest_parts else None
+    # if logical_type == "candidate_data":
+    #     logical_type = "candidate"
 
     return stage, logical_type
 
@@ -157,7 +159,12 @@ def _extract_compression(line: str) -> Optional[str]:
     m = _COMPRESSION_RE.search(line)
     if not m:
         return None
-    return m.group(1)
+    compression = m.group(1)
+    if compression.startswith("compressedV2") and len(compression) > len("compressedV2"):
+        next_char = compression[len("compressedV2")]
+        if next_char != "_":
+            compression = f"compressedV2_{compression[len('compressedV2'):]}"
+    return compression
 
 
 def _extract_time_sec(line: str) -> Optional[float]:
@@ -212,6 +219,8 @@ def _parse_line(line: str) -> LogRecord:
         raise ValueError(f"Could not determine stage (compress/decompress) from type '{raw_type}'")
     
     called_from = _extract_called_from(line)
+    # if log_type == "candidate" and not called_from:
+        # called_from = "validator_session"
     compression = _extract_compression(line)
     if not compression:
         raise ValueError("Missing compression field")
@@ -315,17 +324,8 @@ def write_records_json(
     return out_path
 
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
-
-def main() -> None:
-    """Parse benchmark.log and write records.json."""
-    if len(sys.argv) < 2:
-        print("Usage: python parse_logs.py <experiment_name>")
-        sys.exit(1)
-
-    experiment_name = sys.argv[1]
+def parse_single_experiment(experiment_name: str) -> None:
+    """Parse a single experiment and write records.json."""
     print(f"{c_label('Experiment:')} {c_value(experiment_name)}")
 
     records = read_logs_from_experiment(experiment_name)
@@ -333,6 +333,55 @@ def main() -> None:
 
     out_path = write_records_json(experiment_name, records)
     print(f"{c_ok('Done.')} Records written to {c_value(str(out_path))}")
+
+
+def parse_all_experiments(base_dir: str = "logs") -> None:
+    """Parse all experiments that don't have records.json yet."""
+    experiments: List[str] = []
+    logs_path = Path(base_dir)
+
+    if not logs_path.exists():
+        print(f"{c_warn('Logs directory not found:')} {c_value(str(logs_path))}")
+        return
+
+    # Discover experiments directly inside logs/
+    for item in logs_path.iterdir():
+        if not item.is_dir() or item.name.startswith('.'):
+            continue
+
+        if ((item / "benchmark.log").exists() and
+            (item / "info.json").exists() and
+            not (item / "records.json").exists()):
+            rel_path = item.relative_to(logs_path)
+            experiments.append(str(rel_path))
+
+    experiments = sorted(experiments)
+    print(f"{c_label('Found experiments needing parsing:')} {c_value(str(len(experiments)))}")
+
+    parsed_count = 0
+    for experiment in experiments:
+        try:
+            parse_single_experiment(experiment)
+            parsed_count += 1
+        except Exception as e:
+            print(f"{c_warn('✗ Failed:')} {str(e)}")
+
+    print(f"\n{c_ok('Summary:')} Parsed {c_value(str(parsed_count))} experiments")
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    """Parse benchmark logs and write records.json."""
+    if len(sys.argv) < 2:
+        # No experiment specified - parse all experiments
+        parse_all_experiments()
+    else:
+        # Parse single experiment
+        experiment_name = sys.argv[1]
+        parse_single_experiment(experiment_name)
 
 
 if __name__ == "__main__":

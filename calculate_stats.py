@@ -7,12 +7,8 @@ for each (type, called_from) combination, writing results to stats/<experiment>.
 Usage:
     python calculate_stats.py <experiment_name> [OPTIONS]
 
-Options:
-    --min-block-size SIZE   Only include blocks >= SIZE bytes (e.g. 100000 or 100K)
-    --max-block-size SIZE   Only include blocks <= SIZE bytes (e.g. 100000 or 100K)
-
 Output:
-    stats/<experiment_name>[_mnXK][_mxYK].json
+    stats/<experiment_name>.json
 """
 
 from dataclasses import dataclass
@@ -32,9 +28,6 @@ from log_types import (
     c_ok,
     c_warn,
     c_dim,
-    parse_size_arg,
-    size_to_k_suffix,
-    filter_records_by_block_size,
 )
 
 
@@ -51,13 +44,14 @@ class TypeCalledFromStats:
     chosen origin (e.g. the earliest timestamp seen in the dataset).
     """
     num_blocks: int
-    block_size_points: list[tuple[float, int]]
-    compression_percent_points: list[tuple[float, float]]
-    broadcast_time_avg_points: list[tuple[float, float]]
-    broadcast_time_full_points: list[tuple[float, float]]
-    broadcast_time_66p_points: list[tuple[float, float]]
-    compression_time_points: list[tuple[float, float]]
-    decompression_time_points: list[tuple[float, float]]
+    block_size_points: list[tuple[float, int, str]]
+    compression_percent_points: list[tuple[float, float, str]]
+    broadcast_time_avg_points: list[tuple[float, float, str]]
+    broadcast_time_full_points: list[tuple[float, float, str]]
+    broadcast_time_66p_points: list[tuple[float, float, str]]
+    compression_time_points: list[tuple[float, float, str]]
+    decompression_time_points: list[tuple[float, float, str]]
+    block_size_by_id: dict[str, int]
 
 
 # ---------------------------------------------------------------------------
@@ -114,13 +108,14 @@ def compute_stats_for_type_called_from(
     num_blocks = len(by_block)
 
     # Accumulate with absolute datetimes first, then shift to origin.
-    block_size_points_dt: list[tuple[datetime, int]] = []
-    compression_percent_points_dt: list[tuple[datetime, float]] = []
-    broadcast_time_avg_points_dt: list[tuple[datetime, float]] = []
-    broadcast_time_full_points_dt: list[tuple[datetime, float]] = []
-    broadcast_time_66p_points_dt: list[tuple[datetime, float]] = []
-    compression_time_points_dt: list[tuple[datetime, float]] = []
-    decompression_time_points_dt: list[tuple[datetime, float]] = []
+    block_size_points_dt: list[tuple[datetime, int, str]] = []
+    compression_percent_points_dt: list[tuple[datetime, float, str]] = []
+    broadcast_time_avg_points_dt: list[tuple[datetime, float, str]] = []
+    broadcast_time_full_points_dt: list[tuple[datetime, float, str]] = []
+    broadcast_time_66p_points_dt: list[tuple[datetime, float, str]] = []
+    compression_time_points_dt: list[tuple[datetime, float, str]] = []
+    decompression_time_points_dt: list[tuple[datetime, float, str]] = []
+    block_size_by_id: dict[str, int] = {}
     cnt_blocks_with_several_sizes = 0
     cnt_blocks_with_no_compress_records = 0
     cnt_blocks_with_no_decompress_records = 0
@@ -131,9 +126,9 @@ def compute_stats_for_type_called_from(
         # Compression time data: all compress records
         for rec in recs:
             if rec.stage == "compress":
-                compression_time_points_dt.append((rec.end_ts, rec.duration_sec))
+                compression_time_points_dt.append((rec.end_ts, rec.duration_sec, block_id))
             elif rec.stage == "decompress":
-                decompression_time_points_dt.append((rec.end_ts, rec.duration_sec))
+                decompression_time_points_dt.append((rec.end_ts, rec.duration_sec, block_id))
 
         # Broadcast time data: requires both compress and decompress records.
         compress_ts = sorted([r.start_ts for r in recs if r.stage == "compress"])
@@ -147,17 +142,17 @@ def compute_stats_for_type_called_from(
 
             # Full broadcast time: first compress START to last decompress END.
             full_broadcast = (latest_decompress_ts - earliest_compress_ts).total_seconds()
-            broadcast_time_full_points_dt.append((ts_block, full_broadcast))
+            broadcast_time_full_points_dt.append((ts_block, full_broadcast, block_id))
 
             # Average broadcast time: first compress START to average decompress END.
             avg_decomp_seconds = sum(dt.timestamp() for dt in decompress_ts) / len(decompress_ts)
             avg_decomp_dt = datetime.fromtimestamp(avg_decomp_seconds)
             avg_broadcast = (avg_decomp_dt - earliest_compress_ts).total_seconds()
-            broadcast_time_avg_points_dt.append((ts_block, avg_broadcast))
+            broadcast_time_avg_points_dt.append((ts_block, avg_broadcast, block_id))
 
             # 66th percentile broadcast time over decompression END times
             decomp_secs = np.array([(dt - earliest_compress_ts).total_seconds() for dt in decompress_ts])
-            broadcast_time_66p_points_dt.append((ts_block, float(np.percentile(decomp_secs, 66))))
+            broadcast_time_66p_points_dt.append((ts_block, float(np.percentile(decomp_secs, 66)), block_id))
         else:
             if len(compress_ts) == 0:
                 cnt_blocks_with_no_compress_records += 1
@@ -183,15 +178,20 @@ def compute_stats_for_type_called_from(
         compressed_size = next(iter(all_compressed_size))
 
         # Block size data
-        block_size_points_dt.append((ts_block, original_size))
+        block_size_points_dt.append((ts_block, original_size, block_id))
+        block_size_by_id[block_id] = original_size
 
         # Compression percent data
         compression_percent = (original_size - compressed_size) / original_size
-        compression_percent_points_dt.append((ts_block, compression_percent))
+        compression_percent_points_dt.append((ts_block, compression_percent, block_id))
 
     # Shift all time coordinates to floats (seconds since earliest_ts_global).
-    def shift_points_to_origin(points: list[tuple[datetime, float | int]]) -> list[tuple[float, float | int]]:
-        return sorted([((ts - earliest_ts_global).total_seconds(), value) for ts, value in points])
+    def shift_points_to_origin(
+        points: list[tuple[datetime, float | int, str]],
+    ) -> list[tuple[float, float | int, str]]:
+        return sorted(
+            [((ts - earliest_ts_global).total_seconds(), value, block_id) for ts, value, block_id in points],
+        )
 
     if cnt_blocks_with_no_compress_records > 0:
         print(f"  {c_warn('WARNING:')} {cnt_blocks_with_no_compress_records} blocks have no compress records")
@@ -215,6 +215,7 @@ def compute_stats_for_type_called_from(
         broadcast_time_66p_points=shift_points_to_origin(broadcast_time_66p_points_dt),
         compression_time_points=shift_points_to_origin(compression_time_points_dt),
         decompression_time_points=shift_points_to_origin(decompression_time_points_dt),
+        block_size_by_id=block_size_by_id,
     )
 
 
@@ -255,42 +256,15 @@ def main() -> None:
     """Calculate statistics from records.json and write to stats/*.json."""
     if len(sys.argv) < 2:
         print("Usage: python calculate_stats.py <experiment_name> [OPTIONS]")
-        print("Options:")
-        print("  --min-block-size SIZE   Only include blocks >= SIZE bytes (e.g. 100000 or 100K)")
-        print("  --max-block-size SIZE   Only include blocks <= SIZE bytes (e.g. 100000 or 100K)")
         sys.exit(1)
 
     experiment_name = sys.argv[1]
-    
-    # Check for --min-block-size flag
-    min_block_size = 0
-    if "--min-block-size" in sys.argv:
-        size_idx = sys.argv.index("--min-block-size")
-        if size_idx + 1 < len(sys.argv):
-            min_block_size = parse_size_arg(sys.argv[size_idx + 1])
-    
-    # Check for --max-block-size flag
-    max_block_size = 0
-    if "--max-block-size" in sys.argv:
-        size_idx = sys.argv.index("--max-block-size")
-        if size_idx + 1 < len(sys.argv):
-            max_block_size = parse_size_arg(sys.argv[size_idx + 1])
     
     print(f"{c_label('Experiment:')} {c_value(experiment_name)}")
 
     records = load_records_from_json(experiment_name)
     print(f"{c_label('Total records loaded:')} {c_value(str(len(records)))}")
     
-    # Filter records by block size early (affects all subsequent processing)
-    if min_block_size > 0 or max_block_size > 0:
-        records = filter_records_by_block_size(records, min_block_size, max_block_size)
-        size_filter_msg = []
-        if min_block_size > 0:
-            size_filter_msg.append(f">= {size_to_k_suffix(min_block_size)}")
-        if max_block_size > 0:
-            size_filter_msg.append(f"<= {size_to_k_suffix(max_block_size)}")
-        print(f"{c_label('Records after size filter')} ({', '.join(size_filter_msg)}): {c_value(str(len(records)))}")
-
     grouped_to = group_by_type_called_from_and_block(records)
     print(f"{c_label('(type, called_from) combinations:')} {c_value(str(len(grouped_to)))}")
 
@@ -304,8 +278,6 @@ def main() -> None:
     stats_payload: dict[str, object] = {
         "experiment_name": experiment_name,
         "earliest_ts_global": earliest_ts_global.isoformat(),
-        "min_block_size": min_block_size if min_block_size > 0 else None,
-        "max_block_size": max_block_size if max_block_size > 0 else None,
         "type_called_from_stats": {},
     }
 
@@ -335,6 +307,7 @@ def main() -> None:
             "broadcast_time_66p_points": stats.broadcast_time_66p_points,
             "compression_time_points": stats.compression_time_points,
             "decompression_time_points": stats.decompression_time_points,
+            "block_size_by_id": stats.block_size_by_id,
         }
 
         # Print summary after computing
@@ -344,17 +317,10 @@ def main() -> None:
 
     stats_payload["type_called_from_stats"] = to_stats
 
-    # Build output filename with size filter suffixes
-    filename = experiment_name
-    if min_block_size > 0:
-        filename += f"_mn{size_to_k_suffix(min_block_size)}"
-    if max_block_size > 0:
-        filename += f"_mx{size_to_k_suffix(max_block_size)}"
-
     # Ensure stats directory exists and write JSON file named after the experiment.
     stats_dir = Path("stats")
     stats_dir.mkdir(parents=True, exist_ok=True)
-    out_path = stats_dir / f"{filename}.json"
+    out_path = stats_dir / f"{experiment_name}.json"
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(stats_payload, f, indent=2)
     print(f"\n{c_ok('Done.')} Stats written to {c_value(str(out_path))}")
