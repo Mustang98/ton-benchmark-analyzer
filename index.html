@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Stats Report</title>
+  <script src="https://cdn.plot.ly/plotly-2.26.2.min.js"></script>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen,
+                   Ubuntu, Cantarell, "Fira Sans", "Droid Sans", "Helvetica Neue",
+                   Arial, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+      margin: 0;
+      padding: 0 16px 48px 16px;
+      color: #1f2937;
+      background: #f9fafb;
+    }
+    h1 {
+      margin: 16px 0 12px 0;
+      font-size: 22px;
+    }
+    .card {
+      background: white;
+      border-radius: 8px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.06);
+      padding: 16px;
+      margin: 16px 0;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+    th, td {
+      border-bottom: 1px solid #e5e7eb;
+      padding: 8px 10px;
+      text-align: right;
+      white-space: nowrap;
+    }
+    /* Visual separators between (type, called_from) column groups */
+    .group-start { border-left: 2px solid #9ca3af !important; }
+    /* Highlight best values */
+    .best-cell { background: #dcfce7; color: #065f46; font-weight: 600; }
+    .other-cell { background: #fee2e2; color: #991b1b; }
+    th:first-child, td:first-child {
+      text-align: left;
+    }
+    thead th {
+      position: sticky;
+      top: 0;
+      background: #f3f4f6;
+      z-index: 1;
+    }
+    .tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 8px 0 16px 0;
+    }
+    .tab-btn {
+      padding: 8px 12px;
+      border-radius: 6px;
+      border: 1px solid #e5e7eb;
+      background: white;
+      cursor: pointer;
+    }
+    .tab-btn.active {
+      background: #111827;
+      color: white;
+      border-color: #111827;
+    }
+    .tab-content {
+      display: none;
+    }
+    .tab-content.active {
+      display: block;
+    }
+    .plot {
+      width: 100%;
+      height: 320px;
+    }
+    /* Timeline slider */
+    .timeline-container {
+      background: white;
+      border-radius: 8px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.06);
+      padding: 16px;
+      margin: 16px 0;
+    }
+    .timeline-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+    .timeline-header h2 {
+      margin: 0;
+      font-size: 16px;
+    }
+    .timeline-labels {
+      display: flex;
+      gap: 24px;
+      font-size: 13px;
+      color: #374151;
+    }
+    .timeline-labels span {
+      font-family: monospace;
+    }
+    .timeline-track {
+      position: relative;
+      height: 40px;
+      background: #e5e7eb;
+      border-radius: 6px;
+      cursor: pointer;
+      user-select: none;
+    }
+    .timeline-selection {
+      position: absolute;
+      top: 0;
+      height: 100%;
+      background: #3b82f6;
+      opacity: 0.3;
+      border-radius: 6px;
+    }
+    .timeline-handle {
+      position: absolute;
+      top: 0;
+      width: 12px;
+      height: 100%;
+      background: #1d4ed8;
+      border-radius: 4px;
+      cursor: ew-resize;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: white;
+      font-size: 10px;
+      font-weight: bold;
+      z-index: 2;
+    }
+    .timeline-handle:hover {
+      background: #1e40af;
+    }
+    .timeline-handle.left {
+      border-top-right-radius: 0;
+      border-bottom-right-radius: 0;
+    }
+    .timeline-handle.right {
+      border-top-left-radius: 0;
+      border-bottom-left-radius: 0;
+    }
+  </style>
+</head>
+<body>
+  <h1>Stats Report</h1>
+
+  <div class="timeline-container">
+    <div class="timeline-header">
+      <h2>Time Range Filter</h2>
+      <div class="timeline-labels">
+        <span>L: <span id="timeline-label-left">--</span></span>
+        <span>R: <span id="timeline-label-right">--</span></span>
+        <span>Duration: <span id="timeline-duration">--</span></span>
+      </div>
+    </div>
+    <div class="timeline-track" id="timeline-track">
+      <div class="timeline-selection" id="timeline-selection"></div>
+      <div class="timeline-handle left" id="timeline-handle-left">L</div>
+      <div class="timeline-handle right" id="timeline-handle-right">R</div>
+    </div>
+  </div>
+
+  <div class="card" id="averages-card">
+    <h2 style="margin-top:0">Averages overview</h2>
+    <div id="averages-table-container" style="overflow:auto; max-height: 60vh;"></div>
+  </div>
+
+  <div class="card">
+    <h2 style="margin-top:0">Details</h2>
+    <div style="display:flex; align-items:center; gap:12px; margin:8px 0 12px 0; flex-wrap:wrap;">
+      <label for="smooth-range" style="min-width: 220px;">Averaging window (seconds)</label>
+      <input id="smooth-range" type="range" min="0" max="600" step="1" value="100" />
+      <input id="smooth-number" type="number" min="0" max="600" step="1" value="100" style="width:80px;" />
+      <span style="color:#6b7280;">0 = show all raw points</span>
+      <label for="block-size-range" style="min-width: 220px; margin-left:16px;">Min block size (KB)</label>
+      <input id="block-size-range" type="range" min="0" max="0" step="1" value="0" />
+      <input id="block-size-number" type="number" min="0" max="0" step="1" value="0" style="width:80px;" />
+      <label style="margin-left:16px; display:flex; align-items:center; gap:8px;">
+        <input id="trim-edges" type="checkbox" checked />
+        <span>Trim first 5 min and last 2 min</span>
+      </label>
+    </div>
+    <div class="tabs" id="tabs"></div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
