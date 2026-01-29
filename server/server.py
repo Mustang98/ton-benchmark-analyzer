@@ -137,7 +137,11 @@ def make_handler(
                 return
 
             _CACHE.put(start_key, end_key, payload_json)
-            self.send_gzip_json(payload_json, compresslevel=3)
+            try:
+                self.send_gzip_json(payload_json, compresslevel=3)
+            except (BrokenPipeError, ConnectionResetError):
+                print(f"Client disconnected before response for {start_key} .. {end_key}")
+                return
 
         def send_gzip_json(self, payload_json: str, compresslevel: int = 3) -> None:
             raw = payload_json.encode("utf-8")
