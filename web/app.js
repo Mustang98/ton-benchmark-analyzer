@@ -415,7 +415,7 @@ function buildBlocksData(experiments) {
 }
 
 function setTitle(experimentNames) {
-  const title = "Stats Report - " + experimentNames.join(", ");
+  const title = "Broadcasts performance - " + experimentNames.join(", ");
   document.title = title;
   const el = document.querySelector("h1");
   if (el) el.textContent = title;
