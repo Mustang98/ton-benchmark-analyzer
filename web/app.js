@@ -14,6 +14,10 @@ let UNION_KEYS = [];
 let UNION_MAP = {};
 let EXP_SHORT_NAMES = [];
 let USE_ABSOLUTE_TIME = false;
+let BLOCKS_DATA = [];
+let VISIBLE_BLOCKS = [];
+let ACTIVE_BLOCK_KEY = null;
+let BLOCKS_FILTER_KEY = "all";
 
 let averagingWindowSec = 10; // default 10 seconds
 let trimEdges = true; // default trim enabled
@@ -99,6 +103,7 @@ function computeStatsFromCompressed(payload, fallbackName) {
   const stageMap = maps.stage || [];
   const typeMap = maps.type || [];
   const calledFromMap = maps.called_from || [];
+  const nodeMap = maps.node_id || [];
 
   const ts0 = payload.ts0 ? Date.parse(payload.ts0) : null;
   if (!Array.isArray(payload.blocks) || ts0 === null || Number.isNaN(ts0)) {
@@ -111,6 +116,7 @@ function computeStatsFromCompressed(payload, fallbackName) {
 
   const grouped = new Map();
   let earliestSec = Infinity;
+  const blockMap = new Map();
 
   for (const blockEntry of payload.blocks) {
     const blockId = blockEntry[blockIdx.block_id];
@@ -134,6 +140,7 @@ function computeStatsFromCompressed(payload, fallbackName) {
       const stage = stageMap[rec[recIdx.stage_idx]];
       const type = typeMap[rec[recIdx.type_idx]];
       const calledFrom = calledFromMap[rec[recIdx.called_from_idx]];
+      const nodeId = nodeMap[rec[recIdx.node_idx]];
 
       const sizeIndex = rec[recIdx.size_idx];
       const sizePair = (sizeMap && sizeMap[sizeIndex]) ? sizeMap[sizeIndex] : [null, null];
@@ -158,6 +165,24 @@ function computeStatsFromCompressed(payload, fallbackName) {
         stage,
         original_size: originalSize,
         compressed_size: compressedSize,
+      });
+
+      let blockMeta = blockMap.get(blockId);
+      if (!blockMeta) {
+        blockMeta = { block_id: blockId, size_bytes: null, records: [] };
+        blockMap.set(blockId, blockMeta);
+      }
+      if (blockMeta.size_bytes == null && typeof originalSize === "number" && originalSize > 0) {
+        blockMeta.size_bytes = originalSize;
+      }
+      blockMeta.records.push({
+        start_sec: startSec,
+        end_sec: endSec,
+        duration_sec: durationSec,
+        stage,
+        type,
+        called_from: calledFrom ?? null,
+        node_id: nodeId,
       });
     }
   }
@@ -260,6 +285,27 @@ function computeStatsFromCompressed(payload, fallbackName) {
     experiment_name: payload.experiment_name || fallbackName || "",
     earliest_ts_global: formatLocalIso(earliestSec * 1000),
     type_called_from_stats: statsByKey,
+    blocks: Array.from(blockMap.values())
+      .map(block => {
+        const records = (block.records || []).slice().sort((a, b) => a.start_sec - b.start_sec);
+        if (records.length === 0) return null;
+        const startSec = Math.min(...records.map(r => r.start_sec));
+        const endSec = Math.max(...records.map(r => r.end_sec));
+        const shiftedRecords = records.map(rec => ({
+          ...rec,
+          start_sec: rec.start_sec - earliestSec,
+          end_sec: rec.end_sec - earliestSec,
+        }));
+        return {
+          block_id: block.block_id,
+          size_bytes: block.size_bytes,
+          start_sec: startSec - earliestSec,
+          end_sec: endSec - earliestSec,
+          duration_sec: endSec - startSec,
+          records: shiftedRecords,
+        };
+      })
+      .filter(Boolean),
   };
 }
 
@@ -331,6 +377,43 @@ function buildPlotsData(experiments) {
   return { unionKeys, unionMap, expShortNames, plotsData };
 }
 
+function buildBlocksData(experiments) {
+  const blocks = [];
+  for (const exp of experiments) {
+    const expBlocks = (exp.stats && exp.stats.blocks) ? exp.stats.blocks : [];
+    const baseTs = exp.stats ? exp.stats.earliest_ts_global : null;
+    for (const block of expBlocks) {
+      const signatureStats = {};
+      for (const rec of (block.records || [])) {
+        const typeLabel = rec.type || "None";
+        const cfLabel = rec.called_from || "None";
+        const sigKey = `${typeLabel}__${cfLabel}`;
+        let sig = signatureStats[sigKey];
+        if (!sig) {
+          sig = { min: rec.start_sec, max: rec.end_sec };
+          signatureStats[sigKey] = sig;
+        } else {
+          if (rec.start_sec < sig.min) sig.min = rec.start_sec;
+          if (rec.end_sec > sig.max) sig.max = rec.end_sec;
+        }
+      }
+      const signatureDurations = {};
+      for (const [sigKey, sig] of Object.entries(signatureStats)) {
+        const dur = sig.max - sig.min;
+        if (dur >= 0) signatureDurations[sigKey] = dur;
+      }
+      blocks.push({
+        ...block,
+        key: `${exp.name}__${block.block_id}`,
+        experiment: exp.name,
+        base_ts: baseTs,
+        signature_durations: signatureDurations,
+      });
+    }
+  }
+  return blocks;
+}
+
 function setTitle(experimentNames) {
   const title = "Stats Report - " + experimentNames.join(", ");
   document.title = title;
@@ -342,7 +425,7 @@ function buildTabsAndContents() {
   const tabs = document.getElementById("tabs");
   if (!tabs) return;
   tabs.innerHTML = "";
-  document.querySelectorAll(".tab-content").forEach(el => el.remove());
+  document.querySelectorAll(".plot-tab-content").forEach(el => el.remove());
 
   const fragment = document.createDocumentFragment();
 
@@ -355,7 +438,7 @@ function buildTabsAndContents() {
     tabs.appendChild(btn);
 
     const div = document.createElement("div");
-    div.className = "tab-content";
+    div.className = "plot-tab-content";
     div.id = `tab-${k}`;
     div.innerHTML = `
       <h3 style="margin:8px 0 16px 0">${label}</h3>
@@ -449,6 +532,41 @@ function formatDuration(seconds) {
   if (h > 0) return `${h}h ${m}m ${s}s`;
   if (m > 0) return `${m}m ${s}s`;
   return `${s}s`;
+}
+
+function formatSecondsShort(seconds) {
+  if (!Number.isFinite(seconds)) return "--";
+  return `${seconds.toFixed(3)}s`;
+}
+
+function trimBlockId(id, maxLen = 14) {
+  if (!id && id !== 0) return "--";
+  const str = String(id);
+  if (str.length <= maxLen) return str;
+  const head = Math.max(3, Math.ceil((maxLen - 3) / 2));
+  const tail = Math.max(3, Math.floor((maxLen - 3) / 2));
+  return `${str.slice(0, head)}...${str.slice(-tail)}`;
+}
+
+function copyToClipboard(text) {
+  const value = String(text);
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(value).catch(() => {});
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  try {
+    document.execCommand("copy");
+  } catch {
+    // ignore
+  }
+  document.body.removeChild(textarea);
 }
 
 function secsToTimestamp(secs) {
@@ -963,6 +1081,8 @@ function rebuildAll() {
   if (active) {
     renderTab(active.dataset.tab);
   }
+  renderBlocksTabs();
+  renderBlocksList();
 }
 
 function secsToDate(baseTsStr, secs) {
@@ -1010,6 +1130,155 @@ function renderTab(key) {
   plotSeriesMulti(`${key}-decompression_time`, `${item.label} - Decompression time`, "time", "milliseconds", item.decompression_time_series, blockSizeByIdSeries, ".2f", 1000.0);
 }
 
+function getFilteredBlocks() {
+  const hasSizeFilter = minBlockSizeBytes && minBlockSizeBytes > 0;
+  return BLOCKS_DATA.filter(block => {
+    if (hasSizeFilter && (!block.size_bytes || block.size_bytes < minBlockSizeBytes)) return false;
+    if (block.end_sec < rangeMinT || block.start_sec > rangeMaxT) return false;
+    if (BLOCKS_FILTER_KEY !== "all") {
+      const dur = block.signature_durations ? block.signature_durations[BLOCKS_FILTER_KEY] : null;
+      if (!Number.isFinite(dur)) return false;
+    }
+    return true;
+  });
+}
+
+function renderBlockDetails(block, targetId = "block-details") {
+  const container = document.getElementById(targetId);
+  if (!container) return;
+  if (!block) {
+    container.innerHTML = "";
+    return;
+  }
+  const sizeKb = block.size_bytes ? Math.round(block.size_bytes / 1024) : null;
+  const duration = formatSecondsShort(block.duration_sec);
+  const baseMs = block.base_ts ? new Date(block.base_ts).getTime() : null;
+  const startMs = baseMs != null ? baseMs + block.start_sec * 1000 : null;
+  const startTsLabel = startMs != null ? formatLocalIso(startMs) : "--";
+  const records = block.records || [];
+  const recordRows = records.map((rec, idx) => {
+    const relStart = rec.start_sec - block.start_sec;
+    const relEnd = rec.end_sec - block.start_sec;
+    const startLabel = `+${formatSecondsShort(relStart)}`;
+    const endLabel = `+${formatSecondsShort(relEnd)}`;
+    const stage = rec.stage || "other";
+    const stageClass = stage === "compress" || stage === "decompress" ? stage : "other";
+    const typeLabel = rec.type || "unknown";
+    const calledFrom = rec.called_from ? ` (${rec.called_from})` : "";
+    const nodeLabel = rec.node_id ? String(rec.node_id) : "--";
+    return `
+      <div class="timeline-row">
+        <div class="timeline-index">${idx + 1}.</div>
+        <div>${startLabel} -> ${endLabel}</div>
+        <div class="timeline-stage ${stageClass}">${stage}</div>
+        <div class="timeline-node">${nodeLabel}</div>
+        <div>${typeLabel}${calledFrom}</div>
+      </div>
+    `;
+  }).join("");
+
+  container.innerHTML = `
+    <h3 class="block-id-row">${block.block_id} <button class="copy-btn" type="button">Copy</button></h3>
+    <div class="block-summary">
+      <div>start_ts: ${startTsLabel}</div>
+      <div>Duration: ${duration}</div>
+      <div>Records: ${records.length}</div>
+      <div>Size: ${sizeKb != null ? `${sizeKb} KB` : "--"}</div>
+      <div>Experiment: ${block.experiment}</div>
+    </div>
+    <div class="block-timeline">
+      ${recordRows || `<div class="muted-text" style="padding:8px 0;">No records for this block.</div>`}
+    </div>
+  `;
+  const copyBtn = container.querySelector(".copy-btn");
+  if (copyBtn) {
+    copyBtn.addEventListener("click", () => {
+      copyToClipboard(block.block_id);
+    });
+  }
+}
+
+function renderBlocksList() {
+  const listEl = document.getElementById("blocks-list");
+  const summaryEl = document.getElementById("blocks-summary");
+  const detailsEl = document.getElementById("block-details");
+  if (!listEl || !summaryEl || !detailsEl) return;
+
+  if (BLOCKS_FILTER_KEY === "custom") {
+    summaryEl.textContent = "Custom block selected.";
+    listEl.innerHTML = "";
+    detailsEl.innerHTML = "";
+    return;
+  }
+
+  const filtered = getFilteredBlocks().sort((a, b) => {
+    const aDur = BLOCKS_FILTER_KEY === "all"
+      ? (a.duration_sec || 0)
+      : (a.signature_durations ? (a.signature_durations[BLOCKS_FILTER_KEY] || 0) : 0);
+    const bDur = BLOCKS_FILTER_KEY === "all"
+      ? (b.duration_sec || 0)
+      : (b.signature_durations ? (b.signature_durations[BLOCKS_FILTER_KEY] || 0) : 0);
+    const diff = bDur - aDur;
+    if (diff !== 0) return diff;
+    return String(a.block_id).localeCompare(String(b.block_id));
+  });
+  const topBlocks = filtered.slice(0, 25);
+
+  VISIBLE_BLOCKS = topBlocks;
+  const tabLabel = BLOCKS_FILTER_KEY === "all" ? "all" : (UNION_MAP[BLOCKS_FILTER_KEY]?.label || BLOCKS_FILTER_KEY);
+  summaryEl.textContent = `${topBlocks.length} blocks shown (top 25 by ${tabLabel}). ${filtered.length} match the current filters.`;
+  listEl.innerHTML = "";
+
+  if (!topBlocks.length) {
+    detailsEl.innerHTML = "";
+    listEl.innerHTML = `<div class="muted-text">No blocks match the current filters.</div>`;
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  for (const block of topBlocks) {
+    const tile = document.createElement("div");
+    tile.className = "block-tile";
+    tile.dataset.blockKey = block.key;
+    const sizeKb = block.size_bytes ? Math.round(block.size_bytes / 1024) : null;
+    const trimmedId = trimBlockId(block.block_id);
+    const blockTotal = formatSecondsShort(block.duration_sec || 0);
+    let mainDuration = blockTotal;
+    let bracketLabel = "";
+    if (BLOCKS_FILTER_KEY !== "all") {
+      const sigDur = block.signature_durations ? (block.signature_durations[BLOCKS_FILTER_KEY] || 0) : 0;
+      mainDuration = formatSecondsShort(sigDur);
+      bracketLabel = `(block total ${blockTotal})`;
+    }
+    tile.innerHTML = `
+      <div class="block-id-row">
+        <div class="block-id"><span class="block-id-mono" title="${block.block_id}">${trimmedId}</span></div>
+      </div>
+      <div class="block-metrics">
+        <span class="block-duration">${mainDuration}</span>
+        ${bracketLabel ? `<span class="block-meta">${bracketLabel}</span>` : ""}
+        <span class="block-meta">| ${sizeKb != null ? `${sizeKb} KB` : "--"}</span>
+      </div>
+    `;
+    tile.addEventListener("click", () => {
+      ACTIVE_BLOCK_KEY = block.key;
+      document.querySelectorAll(".block-tile").forEach(el => {
+        el.classList.toggle("active", el.dataset.blockKey === ACTIVE_BLOCK_KEY);
+      });
+      renderBlockDetails(block);
+    });
+    fragment.appendChild(tile);
+  }
+  listEl.appendChild(fragment);
+
+  const selected = topBlocks.find(b => b.key === ACTIVE_BLOCK_KEY) || topBlocks[0];
+  ACTIVE_BLOCK_KEY = selected.key;
+  document.querySelectorAll(".block-tile").forEach(el => {
+    el.classList.toggle("active", el.dataset.blockKey === ACTIVE_BLOCK_KEY);
+  });
+  renderBlockDetails(selected);
+}
+
 function updateVisibleTabs() {
   const visibleKeys = new Set(getVisibleUnionKeys());
   let firstVisible = null;
@@ -1018,7 +1287,7 @@ function updateVisibleTabs() {
     btn.style.display = isVisible ? "" : "none";
     if (isVisible && !firstVisible) firstVisible = btn.dataset.tab;
   });
-  document.querySelectorAll(".tab-content").forEach(div => {
+  document.querySelectorAll(".plot-tab-content").forEach(div => {
     const key = div.id.replace("tab-", "");
     const isVisible = visibleKeys.has(key);
     div.style.display = isVisible ? "" : "none";
@@ -1036,7 +1305,7 @@ function setActiveTab(key) {
   document.querySelectorAll(".tab-btn").forEach(btn => {
     btn.classList.toggle("active", btn.dataset.tab === key);
   });
-  document.querySelectorAll(".tab-content").forEach(div => {
+  document.querySelectorAll(".plot-tab-content").forEach(div => {
     div.classList.toggle("active", div.id === "tab-" + key);
   });
 }
@@ -1090,10 +1359,87 @@ function setupTabs() {
   });
 }
 
+function setupDetailsTabs() {
+  document.querySelectorAll(".details-tab-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const key = btn.dataset.tab;
+      document.querySelectorAll(".details-tab-btn").forEach(other => {
+        other.classList.toggle("active", other.dataset.tab === key);
+      });
+      document.querySelectorAll(".details-tab-content").forEach(panel => {
+        panel.classList.toggle("active", panel.id === `details-${key}`);
+      });
+      if (key === "blocks") {
+        renderBlocksTabs();
+        renderBlocksList();
+      }
+    });
+  });
+}
+
+function setupCustomBlockSearch() {
+  const input = document.getElementById("custom-block-id");
+  const button = document.getElementById("custom-block-btn");
+  const details = document.getElementById("custom-block-details");
+  if (!input || !button || !details) return;
+
+  function findBlockById(raw) {
+    const trimmed = String(raw || "").trim();
+    if (!trimmed) return null;
+    return BLOCKS_DATA.find(block => String(block.block_id) === trimmed) || null;
+  }
+
+  function showBlock() {
+    const block = findBlockById(input.value);
+    if (!block) {
+      details.innerHTML = `<div class="muted-text">Block not found in current data.</div>`;
+      return;
+    }
+    renderBlockDetails(block, "custom-block-details");
+  }
+
+  button.addEventListener("click", showBlock);
+  input.addEventListener("keydown", e => {
+    if (e.key === "Enter") showBlock();
+  });
+}
+
+function renderBlocksTabs() {
+  const container = document.getElementById("blocks-tabs");
+  if (!container) return;
+  container.innerHTML = "";
+  const keys = ["all", ...getVisibleUnionKeys(), "custom"];
+  for (const key of keys) {
+    const label = key === "all" ? "All" : (key === "custom" ? "Custom block" : (UNION_MAP[key]?.label || key));
+    const btn = document.createElement("button");
+    btn.className = "tab-btn";
+    btn.dataset.tab = key;
+    btn.textContent = label;
+    btn.classList.toggle("active", key === BLOCKS_FILTER_KEY);
+    btn.addEventListener("click", () => {
+      BLOCKS_FILTER_KEY = key;
+      container.querySelectorAll(".tab-btn").forEach(b => {
+        b.classList.toggle("active", b.dataset.tab === key);
+      });
+      const customPanel = document.getElementById("blocks-custom-panel");
+      const blocksLayout = document.querySelector("#details-blocks .blocks-layout");
+      if (customPanel && blocksLayout) {
+        const showCustom = key === "custom";
+        customPanel.style.display = showCustom ? "" : "none";
+        blocksLayout.style.display = showCustom ? "none" : "";
+      }
+      renderBlocksList();
+    });
+    container.appendChild(btn);
+  }
+}
+
 function initializeUI() {
   buildTabsAndContents();
   setupTabs();
+  setupDetailsTabs();
   setupControls();
+  setupCustomBlockSearch();
 
   USE_ABSOLUTE_TIME = EXP_SHORT_NAMES.length === 1;
 
@@ -1110,6 +1456,8 @@ function initializeUI() {
   updateTimelineHandles();
 
   rebuildAveragesTable();
+  renderBlocksTabs();
+  renderBlocksList();
 
   const firstBtn = document.querySelector(".tab-btn");
   if (firstBtn) {
@@ -1266,6 +1614,7 @@ async function loadAndInit() {
     UNION_KEYS = data.unionKeys;
     UNION_MAP = data.unionMap;
     EXP_SHORT_NAMES = data.expShortNames;
+    BLOCKS_DATA = buildBlocksData(experiments);
 
     initializeUI();
     return;
@@ -1306,6 +1655,7 @@ async function loadAndInit() {
   UNION_KEYS = data.unionKeys;
   UNION_MAP = data.unionMap;
   EXP_SHORT_NAMES = data.expShortNames;
+  BLOCKS_DATA = buildBlocksData(experiments);
 
   setStatus("", "");
   initializeUI();

@@ -122,15 +122,195 @@
       color: white;
       border-color: #111827;
     }
-    .tab-content {
+    .plot-tab-content {
       display: none;
     }
-    .tab-content.active {
+    .plot-tab-content.active {
+      display: block;
+    }
+    .details-tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 0 0 16px 0;
+      border-bottom: 2px solid #e5e7eb;
+    }
+    .details-tab-btn {
+      padding: 10px 18px;
+      border-radius: 8px 8px 0 0;
+      border: 1px solid transparent;
+      border-bottom: 2px solid transparent;
+      background: transparent;
+      cursor: pointer;
+      font-size: 16px;
+      font-weight: 600;
+      color: #6b7280;
+      margin-bottom: -2px;
+      flex: 1 1 0;
+      text-align: center;
+    }
+    .details-tab-btn.active {
+      background: white;
+      color: #111827;
+      border-color: #e5e7eb #e5e7eb white;
+      box-shadow: 0 -1px 0 white;
+    }
+    .details-tab-content {
+      display: none;
+    }
+    .details-tab-content.active {
       display: block;
     }
     .plot {
       width: 100%;
       height: 320px;
+    }
+    .blocks-layout {
+      display: grid;
+      grid-template-columns: 320px minmax(0, 1fr);
+      gap: 16px;
+      align-items: start;
+    }
+    @media (max-width: 900px) {
+      .blocks-layout {
+        grid-template-columns: 1fr;
+      }
+    }
+    .blocks-sidebar {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .blocks-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .block-tile {
+      background: white;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      padding: 12px;
+      cursor: pointer;
+      transition: border-color 0.15s ease, box-shadow 0.15s ease;
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .block-tile:hover {
+      border-color: #9ca3af;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+    }
+    .block-tile.active {
+      border-color: #111827;
+      box-shadow: 0 3px 10px rgba(17,24,39,0.18);
+    }
+    .block-title {
+      font-weight: 600;
+      font-size: 14px;
+    }
+    .block-duration {
+      font-size: 16px;
+      font-weight: 700;
+      color: #111827;
+    }
+    .block-metrics {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: #6b7280;
+    }
+    .block-metrics .block-duration {
+      font-size: 14px;
+      color: #111827;
+    }
+    .block-meta {
+      font-size: 12px;
+      color: #6b7280;
+    }
+    .block-id-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      width: 100%;
+    }
+    .block-id {
+      font-weight: 600;
+      font-size: 13px;
+      color: #111827;
+    }
+    .block-id-mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    }
+    .copy-btn {
+      font-size: 11px;
+      border: 1px solid #e5e7eb;
+      background: #f9fafb;
+      border-radius: 6px;
+      padding: 4px 8px;
+      cursor: pointer;
+      color: #374151;
+    }
+    .copy-btn:hover {
+      background: #f3f4f6;
+    }
+    .copy-btn:active {
+      background: #e5e7eb;
+    }
+    .block-details {
+      margin-top: 16px;
+      background: white;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      padding: 12px;
+    }
+    .block-details h3 {
+      margin: 0 0 8px 0;
+    }
+    .block-summary {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      font-size: 13px;
+      color: #4b5563;
+    }
+    .block-timeline {
+      margin-top: 12px;
+      border-top: 1px solid #e5e7eb;
+    }
+    .timeline-row {
+      display: grid;
+      grid-template-columns: 48px minmax(170px, 1fr) 90px 80px minmax(160px, 1fr);
+      gap: 8px;
+      padding: 6px 0;
+      border-bottom: 1px solid #f3f4f6;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: 12px;
+    }
+    .timeline-index {
+      text-align: right;
+      color: #9ca3af;
+    }
+    .timeline-node {
+      color: #4b5563;
+    }
+    .timeline-stage.compress {
+      color: #15803d;
+      font-weight: 600;
+    }
+    .timeline-stage.decompress {
+      color: #b45309;
+      font-weight: 600;
+    }
+    .timeline-stage.other {
+      color: #374151;
+      font-weight: 600;
+    }
+    .muted-text {
+      color: #6b7280;
+      font-size: 13px;
     }
     /* Timeline slider */
     .timeline-container {
@@ -227,6 +407,11 @@
       <div class="timeline-handle left" id="timeline-handle-left">L</div>
       <div class="timeline-handle right" id="timeline-handle-right">R</div>
     </div>
+    <div style="display:flex; align-items:center; gap:12px; margin-top:12px; flex-wrap:wrap;">
+      <label for="block-size-range" style="min-width: 220px;">Min block size (KB)</label>
+      <input id="block-size-range" type="range" min="0" max="0" step="1" value="0" />
+      <input id="block-size-number" type="number" min="0" max="0" step="1" value="0" style="width:80px;" />
+    </div>
   </div>
 
   <div class="card" id="averages-card">
@@ -235,21 +420,43 @@
   </div>
 
   <div class="card">
-    <h2 style="margin-top:0">Details</h2>
-    <div style="display:flex; align-items:center; gap:12px; margin:8px 0 12px 0; flex-wrap:wrap;">
-      <label for="smooth-range" style="min-width: 220px;">Averaging window (seconds)</label>
-      <input id="smooth-range" type="range" min="0" max="600" step="1" value="10" />
-      <input id="smooth-number" type="number" min="0" max="600" step="1" value="10" style="width:80px;" />
-      <span style="color:#6b7280;">0 = show all raw points</span>
-      <label for="block-size-range" style="min-width: 220px; margin-left:16px;">Min block size (KB)</label>
-      <input id="block-size-range" type="range" min="0" max="0" step="1" value="0" />
-      <input id="block-size-number" type="number" min="0" max="0" step="1" value="0" style="width:80px;" />
-      <label style="margin-left:16px; display:flex; align-items:center; gap:8px;">
-        <input id="trim-edges" type="checkbox" checked />
-        <span>Trim first 5 min and last 2 min</span>
-      </label>
+    <div class="details-tabs" id="details-tabs">
+      <button class="details-tab-btn active" data-tab="time-plots">Time plots</button>
+      <button class="details-tab-btn" data-tab="blocks">Blocks</button>
     </div>
-    <div class="tabs" id="tabs"></div>
+    <div class="details-tab-content active" id="details-time-plots">
+      <div style="display:flex; align-items:center; gap:12px; margin:8px 0 12px 0; flex-wrap:wrap;">
+        <label for="smooth-range" style="min-width: 220px;">Averaging window (seconds)</label>
+        <input id="smooth-range" type="range" min="0" max="600" step="1" value="10" />
+        <input id="smooth-number" type="number" min="0" max="600" step="1" value="10" style="width:80px;" />
+        <span style="color:#6b7280;">0 = show all raw points</span>
+        <label style="margin-left:16px; display:flex; align-items:center; gap:8px;">
+          <input id="trim-edges" type="checkbox" checked />
+          <span>Trim first 5 min and last 2 min</span>
+        </label>
+      </div>
+      <div class="tabs" id="tabs"></div>
+    </div>
+    <div class="details-tab-content" id="details-blocks">
+      <div class="tabs" id="blocks-tabs"></div>
+      <div id="blocks-custom-panel" style="display:none; margin:8px 0 16px 0;">
+        <div style="display:flex; align-items:center; gap:12px; margin:8px 0 16px 0; flex-wrap:wrap;">
+          <label for="custom-block-id" style="min-width: 120px;">Block id</label>
+          <input id="custom-block-id" type="text" placeholder="Paste full block id" style="min-width:260px; flex:1;" />
+          <button id="custom-block-btn" class="tab-btn" type="button">Show</button>
+        </div>
+        <div class="block-details" id="custom-block-details"></div>
+      </div>
+      <div class="blocks-layout">
+        <div class="blocks-sidebar">
+          <div class="muted-text" id="blocks-summary">Loading blocks...</div>
+          <div class="blocks-list" id="blocks-list"></div>
+        </div>
+        <div class="blocks-details-panel">
+          <div class="block-details" id="block-details"></div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <script src="app.js"></script>
