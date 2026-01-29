@@ -492,7 +492,7 @@ _PARALLEL_MIN_LINES = 20000
 
 
 def _get_worker_count() -> int:
-    return 16
+    return 24
     raw = os.environ.get("PARSE_WORKERS")
     if raw:
         try:
@@ -555,34 +555,34 @@ def _parse_lines_chunk(
     return parsed
 
 
-def parse_and_write_compressed(
+def build_compressed_payload_from_log(
+    benchmark_log: Path,
     experiment_name: str,
-    base_dir: str = "logs",
     timing: bool = False,
-) -> tuple[Path, Path]:
+) -> tuple[Dict[str, Any], str, Optional[Dict[str, Any]]]:
     """
-    Parse benchmark.log and write compressed records.json and records.js.
+    Parse a benchmark.log file and return (payload, payload_json, timing_stats).
+    Does not write any output files.
     """
-    experiment_dir = Path(base_dir) / experiment_name
-    benchmark_log = experiment_dir / "benchmark.log"
-    out_path = experiment_dir / "records.json"
-
     if not benchmark_log.exists():
         raise FileNotFoundError(f"Benchmark log not found: {benchmark_log}")
 
-    timing_stats = {
-        "total_s": 0.0,
-        "loop_s": 0.0,
-        "parse_s": 0.0,
-        "ts_s": 0.0,
-        "map_s": 0.0,
-        "adjust_s": 0.0,
-        "write_s": 0.0,
-        "lines_total": 0,
-        "lines_matched": 0,
-        "records_total": 0,
-    }
-    t_total_start = time.perf_counter()
+    timing_stats: Optional[Dict[str, Any]] = None
+    t_total_start = None
+    if timing:
+        timing_stats = {
+            "total_s": 0.0,
+            "loop_s": 0.0,
+            "parse_s": 0.0,
+            "ts_s": 0.0,
+            "map_s": 0.0,
+            "adjust_s": 0.0,
+            "write_s": 0.0,
+            "lines_total": 0,
+            "lines_matched": 0,
+            "records_total": 0,
+        }
+        t_total_start = time.perf_counter()
 
     node_map = ValueMap(values=[], index_by_value={})
     stage_map = ValueMap(values=[], index_by_value={})
@@ -597,21 +597,23 @@ def parse_and_write_compressed(
     t_read_start = time.perf_counter()
     with open(benchmark_log, "r", encoding="utf-8", errors="replace") as f:
         all_lines = [line.rstrip("\n") for line in f]
-    if timing:
+    if timing_stats is not None:
         timing_stats["read_s"] = time.perf_counter() - t_read_start
 
     t_loop_start = time.perf_counter()
     t_find_start = time.perf_counter()
     matched_lines: List[Tuple[int, str, int]] = []
+    lines_total = 0
     for line_num, line in enumerate(all_lines, 1):
-        timing_stats["lines_total"] += 1
+        lines_total += 1
         marker_idx = line.find(BENCHMARK_MARKER)
         if marker_idx == -1:
             continue
         matched_lines.append((line_num, line, marker_idx))
-    if timing:
+    if timing_stats is not None:
         timing_stats["find_s"] = time.perf_counter() - t_find_start
-    timing_stats["lines_matched"] = len(matched_lines)
+        timing_stats["lines_total"] = lines_total
+        timing_stats["lines_matched"] = len(matched_lines)
 
     t_parse_start = time.perf_counter() if timing else None
     parsed_records: List[Tuple[str, str, str, str, Optional[str], str, Optional[int], Optional[int], int, int]] = []
@@ -627,10 +629,17 @@ def parse_and_write_compressed(
                     parsed_records.extend(chunk)
         else:
             parsed_records = _parse_lines_chunk(matched_lines)
-    if timing:
+    if timing_stats is not None:
         timing_stats["parse_s"] = time.perf_counter() - t_parse_start
 
     t_map_start = time.perf_counter() if timing else None
+    blocks_get = blocks.get
+    blocks_set = blocks.__setitem__
+    node_get = node_map.get_index
+    stage_get = stage_map.get_index
+    type_get = type_map.get_index
+    called_from_get = called_from_map.get_index
+    compression_get = compression_map.get_index
     for (
         node_id,
         block_id,
@@ -646,16 +655,16 @@ def parse_and_write_compressed(
         if ts0_us is None or start_us < ts0_us:
             ts0_us = start_us
 
-        block = blocks.get(block_id)
+        block = blocks_get(block_id)
         if block is None:
             block = BlockBucket(block_id=block_id, size_map=[], size_index={}, records=[])
-            blocks[block_id] = block
+            blocks_set(block_id, block)
 
-        node_idx = node_map.get_index(node_id)
-        stage_idx = stage_map.get_index(stage)
-        type_idx = type_map.get_index(log_type)
-        called_from_idx = called_from_map.get_index(called_from)
-        compression_idx = compression_map.get_index(compression)
+        node_idx = node_get(node_id)
+        stage_idx = stage_get(stage)
+        type_idx = type_get(log_type)
+        called_from_idx = called_from_get(called_from)
+        compression_idx = compression_get(compression)
         size_idx = block.get_size_index(original_size, compressed_size)
 
         block.records.append(
@@ -672,9 +681,9 @@ def parse_and_write_compressed(
         )
         total_records += 1
     
-    if timing:
+    if timing_stats is not None:
         timing_stats["map_s"] = time.perf_counter() - t_map_start
-    timing_stats["loop_s"] = time.perf_counter() - t_loop_start
+        timing_stats["loop_s"] = time.perf_counter() - t_loop_start
 
     t_adjust_start = time.perf_counter() if timing else None
     if ts0_us is None:
@@ -682,7 +691,7 @@ def parse_and_write_compressed(
     for block in blocks.values():
         for rec in block.records:
             rec[1] -= ts0_us
-    if timing:
+    if timing_stats is not None:
         timing_stats["adjust_s"] = time.perf_counter() - t_adjust_start
 
     blocks_payload: List[list] = []
@@ -725,8 +734,34 @@ def parse_and_write_compressed(
         "blocks": blocks_payload,
     }
 
-    t_write_start = time.perf_counter() if timing else None
     payload_json = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+    if timing_stats is not None and t_total_start is not None:
+        timing_stats["records_total"] = total_records
+        timing_stats["total_s"] = time.perf_counter() - t_total_start
+        timing_stats["used_parallel"] = used_parallel
+
+    return payload, payload_json, timing_stats
+
+
+def parse_and_write_compressed(
+    experiment_name: str,
+    base_dir: str = "logs",
+    timing: bool = False,
+) -> tuple[Path, Path]:
+    """
+    Parse benchmark.log and write compressed records.json and records.js.
+    """
+    experiment_dir = Path(base_dir) / experiment_name
+    benchmark_log = experiment_dir / "benchmark.log"
+    out_path = experiment_dir / "records.json"
+
+    payload, payload_json, timing_stats = build_compressed_payload_from_log(
+        benchmark_log,
+        experiment_name,
+        timing=timing,
+    )
+
+    t_write_start = time.perf_counter() if timing else None
     out_path.write_text(payload_json, encoding="utf-8")
 
     out_js = experiment_dir / "records.js"
@@ -736,12 +771,11 @@ def parse_and_write_compressed(
         f"{payload_json};\n"
     )
     out_js.write_text(js, encoding="utf-8")
-    if timing:
+    if timing and timing_stats is not None and t_write_start is not None:
         timing_stats["write_s"] = time.perf_counter() - t_write_start
+        timing_stats["total_s"] += timing_stats["write_s"]
 
-    if timing:
-        timing_stats["records_total"] = total_records
-        timing_stats["total_s"] = time.perf_counter() - t_total_start
+    if timing and timing_stats is not None:
         io_s = timing_stats["loop_s"] - timing_stats["parse_s"] - timing_stats["ts_s"] - timing_stats["map_s"]
         print(f"{c_label('Timing')} total={timing_stats['total_s']:.3f}s \n"
               f"loop={timing_stats['loop_s']:.3f}s io~{io_s:.3f}s \n"
@@ -752,7 +786,7 @@ def parse_and_write_compressed(
               f"find={timing_stats['find_s']:.3f}s")
         print(f"{c_label('Counts')} lines={timing_stats['lines_total']} \n"
               f"matched={timing_stats['lines_matched']} records={timing_stats['records_total']}")
-        if used_parallel:
+        if timing_stats.get("used_parallel"):
             print(f"{c_label('Note')} parse includes timestamp conversion (parallel)")
 
     return out_path, out_js

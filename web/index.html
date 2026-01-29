@@ -15,6 +15,59 @@
       color: #1f2937;
       background: #f9fafb;
     }
+    .status-overlay {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(15, 23, 42, 0.35);
+      backdrop-filter: blur(2px);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s ease;
+      z-index: 1000;
+    }
+    .status-overlay.visible {
+      opacity: 1;
+      pointer-events: all;
+    }
+    .status-card {
+      background: white;
+      border-radius: 12px;
+      box-shadow: 0 10px 25px rgba(0,0,0,0.18);
+      padding: 20px 28px;
+      min-width: 280px;
+      text-align: center;
+    }
+    .status-card.error {
+      border: 1px solid #fecaca;
+    }
+    .status-title {
+      font-size: 15px;
+      font-weight: 600;
+      color: #111827;
+      margin-top: 6px;
+    }
+    .status-card.error .status-title {
+      color: #b91c1c;
+    }
+    .spinner {
+      width: 42px;
+      height: 42px;
+      border-radius: 50%;
+      border: 4px solid #e5e7eb;
+      border-top-color: #3b82f6;
+      margin: 0 auto 8px auto;
+      animation: spin 0.9s linear infinite;
+    }
+    .status-card.error .spinner {
+      border-top-color: #ef4444;
+    }
+    @keyframes spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
     h1 {
       margin: 16px 0 12px 0;
       font-size: 22px;
@@ -152,6 +205,12 @@
   </style>
 </head>
 <body>
+  <div class="status-overlay" id="status-overlay" aria-live="polite">
+    <div class="status-card" id="status-card">
+      <div class="spinner"></div>
+      <div class="status-title" id="status-text"></div>
+    </div>
+  </div>
   <h1>Stats Report</h1>
 
   <div class="timeline-container">
@@ -171,7 +230,7 @@
   </div>
 
   <div class="card" id="averages-card">
-    <h2 style="margin-top:0">Averages overview</h2>
+    <h2 style="margin-top:0">Broadcasts perfomance overview</h2>
     <div id="averages-table-container" style="overflow:auto; max-height: 60vh;"></div>
   </div>
 
@@ -179,8 +238,8 @@
     <h2 style="margin-top:0">Details</h2>
     <div style="display:flex; align-items:center; gap:12px; margin:8px 0 12px 0; flex-wrap:wrap;">
       <label for="smooth-range" style="min-width: 220px;">Averaging window (seconds)</label>
-      <input id="smooth-range" type="range" min="0" max="600" step="1" value="100" />
-      <input id="smooth-number" type="number" min="0" max="600" step="1" value="100" style="width:80px;" />
+      <input id="smooth-range" type="range" min="0" max="600" step="1" value="10" />
+      <input id="smooth-number" type="number" min="0" max="600" step="1" value="10" style="width:80px;" />
       <span style="color:#6b7280;">0 = show all raw points</span>
       <label for="block-size-range" style="min-width: 220px; margin-left:16px;">Min block size (KB)</label>
       <input id="block-size-range" type="range" min="0" max="0" step="1" value="0" />

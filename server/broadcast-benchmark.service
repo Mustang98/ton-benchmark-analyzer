@@ -1,0 +1,17 @@
+[Unit]
+Description=Broadcast benchmark HTTP server
+After=network.target
+
+[Service]
+Type=simple
+User=vallas
+Group=vallas
+WorkingDirectory=/home/vallas/ton-benchmark-analyzer
+ExecStart=/usr/bin/python3 /home/vallas/ton-benchmark-analyzer/server/server.py --host 127.0.0.1 --port 8081 --root /home/vallas/ton-benchmark-analyzer/web
+Environment=PYTHONUNBUFFERED=1
+CacheDirectory=broadcast-benchmark
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

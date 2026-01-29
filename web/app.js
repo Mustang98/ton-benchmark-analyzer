@@ -15,7 +15,7 @@ let UNION_MAP = {};
 let EXP_SHORT_NAMES = [];
 let USE_ABSOLUTE_TIME = false;
 
-let averagingWindowSec = 60; // default 1 minute
+let averagingWindowSec = 10; // default 10 seconds
 let trimEdges = true; // default trim enabled
 let minBlockSizeBytes = 0; // 0 = no filter
 
@@ -27,6 +27,21 @@ let globalBaseTsMs = null;  // base timestamp in milliseconds for converting to 
 
 let globalMinBlockSize = Infinity;
 let globalMaxBlockSize = -Infinity;
+
+function setStatus(message, state = "") {
+  const overlay = document.getElementById("status-overlay");
+  const card = document.getElementById("status-card");
+  const text = document.getElementById("status-text");
+  if (!overlay || !card || !text) return;
+  if (!message) {
+    overlay.classList.remove("visible");
+    return;
+  }
+  text.textContent = message;
+  card.className = "status-card";
+  if (state) card.classList.add(state);
+  overlay.classList.add("visible");
+}
 
 function indexMap(fields, fallback) {
   const list = (fields && fields.length) ? fields : fallback;
@@ -344,11 +359,11 @@ function buildTabsAndContents() {
     div.id = `tab-${k}`;
     div.innerHTML = `
       <h3 style="margin:8px 0 16px 0">${label}</h3>
+      <div id="${k}-broadcast_full" class="plot"></div>
+      <div id="${k}-broadcast_66p" class="plot"></div>
+      <div id="${k}-broadcast_avg" class="plot"></div>
       <div id="${k}-block_size" class="plot"></div>
       <div id="${k}-compression_percent" class="plot"></div>
-      <div id="${k}-broadcast_avg" class="plot"></div>
-      <div id="${k}-broadcast_66p" class="plot"></div>
-      <div id="${k}-broadcast_full" class="plot"></div>
       <div id="${k}-compression_time" class="plot"></div>
       <div id="${k}-decompression_time" class="plot"></div>
     `;
@@ -986,11 +1001,11 @@ function renderTab(key) {
   if (!item) return;
   if (!hasBlocksAfterSizeFilter(item)) return;
   const blockSizeByIdSeries = item.block_size_by_id_series || [];
+  plotSeriesMulti(`${key}-broadcast_full`, `${item.label} - Broadcast time (full)`, "time", "seconds", item.broadcast_time_full_series, blockSizeByIdSeries, ".2f");
+  plotSeriesMulti(`${key}-broadcast_66p`, `${item.label} - Broadcast time (66p)`, "time", "seconds", item.broadcast_time_66p_series, blockSizeByIdSeries, ".2f");
+  plotSeriesMulti(`${key}-broadcast_avg`, `${item.label} - Broadcast time (avg)`, "time", "seconds", item.broadcast_time_avg_series, blockSizeByIdSeries, ".2f");
   plotSeriesMulti(`${key}-block_size`, `${item.label} - Block size`, "time", "size (bytes)", item.block_size_series, blockSizeByIdSeries);
   plotSeriesMulti(`${key}-compression_percent`, `${item.label} - Compression %`, "time", "percent", item.compression_percent_series, blockSizeByIdSeries, ".2f", 100.0);
-  plotSeriesMulti(`${key}-broadcast_avg`, `${item.label} - Broadcast (avg)`, "time", "seconds", item.broadcast_time_avg_series, blockSizeByIdSeries, ".2f");
-  plotSeriesMulti(`${key}-broadcast_66p`, `${item.label} - Broadcast (66p)`, "time", "seconds", item.broadcast_time_66p_series, blockSizeByIdSeries, ".2f");
-  plotSeriesMulti(`${key}-broadcast_full`, `${item.label} - Broadcast (full)`, "time", "seconds", item.broadcast_time_full_series, blockSizeByIdSeries, ".2f");
   plotSeriesMulti(`${key}-compression_time`, `${item.label} - Compression time`, "time", "milliseconds", item.compression_time_series, blockSizeByIdSeries, ".2f", 1000.0);
   plotSeriesMulti(`${key}-decompression_time`, `${item.label} - Decompression time`, "time", "milliseconds", item.decompression_time_series, blockSizeByIdSeries, ".2f", 1000.0);
 }
@@ -1119,6 +1134,29 @@ function getExperimentNamesFromQuery() {
   return [];
 }
 
+function getTimeRangeFromQuery() {
+  const params = new URLSearchParams(window.location.search);
+  const start = params.get("start");
+  const end = params.get("end");
+  if (start && end) {
+    return { start, end };
+  }
+  return null;
+}
+
+function getDisplayNameFromQuery() {
+  const params = new URLSearchParams(window.location.search);
+  const name = params.get("name");
+  if (!name) return "";
+  return name.trim();
+}
+
+function trimLabel(value, maxLen = 15) {
+  if (!value) return "";
+  const trimmed = String(value).trim();
+  return trimmed.length > maxLen ? trimmed.slice(0, maxLen) : trimmed;
+}
+
 function loadExperimentScript(name) {
   return new Promise((resolve, reject) => {
     if (window.__compressed_records && window.__compressed_records[name]) {
@@ -1133,38 +1171,143 @@ function loadExperimentScript(name) {
   });
 }
 
+async function fetchServerPayload(range) {
+  const url = `/get_benchmark_data?start=${encodeURIComponent(range.start)}&end=${encodeURIComponent(range.end)}`;
+  const startMs = Date.parse(range.start);
+  const endMs = Date.parse(range.end);
+  const durationMs = Number.isFinite(startMs) && Number.isFinite(endMs) ? Math.max(0, endMs - startMs) : 0;
+  const expectedPrepareMs = durationMs ? (durationMs / 3600000) * 15000 : 0;
+  let prepareTimer = null;
+  const prepareStart = performance.now();
+
+  if (expectedPrepareMs > 0) {
+    setStatus("Preparing... 0%", "loading");
+    prepareTimer = setInterval(() => {
+      const elapsed = performance.now() - prepareStart;
+      const pct = Math.min(99, Math.floor((elapsed / expectedPrepareMs) * 100));
+      setStatus(`Preparing... ${pct}%`, "loading");
+    }, 500);
+  } else {
+    setStatus(`Preparing ${range.start} .. ${range.end}`, "loading");
+  }
+
+  const res = await fetch(url);
+  if (prepareTimer) clearInterval(prepareTimer);
+  if (!res.ok) {
+    let detail = `Request failed: ${res.status} ${res.statusText}`;
+    try {
+      const err = await res.json();
+      if (err && err.error) detail = err.error;
+    } catch {
+      // ignore JSON parse errors
+    }
+    throw new Error(detail);
+  }
+  const total = Number(res.headers.get("Content-Length")) || 0;
+  const encoding = (res.headers.get("Content-Encoding") || "").toLowerCase();
+  const uncompressed = Number(res.headers.get("X-Uncompressed-Length")) || 0;
+  const canUsePercent = encoding === "gzip" ? uncompressed > 0 : total > 0;
+  setStatus("Downloading...", "loading");
+
+  if (!res.body) {
+    const payload = await res.json();
+    setStatus("", "");
+    return payload;
+  }
+
+  const reader = res.body.getReader();
+  const chunks = [];
+  let received = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    received += value.length;
+    if (canUsePercent) {
+      const denom = encoding === "gzip" ? uncompressed : total;
+      const pct = Math.min(100, Math.floor((received / denom) * 100));
+      setStatus(`Downloading... ${pct}%`, "loading");
+    } else {
+      const mb = (received / (1024 * 1024)).toFixed(1);
+      setStatus(`Downloading... ${mb} MB`, "loading");
+    }
+  }
+  const merged = new Uint8Array(received);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.length;
+  }
+  const text = new TextDecoder("utf-8").decode(merged);
+  const payload = JSON.parse(text);
+  setStatus("", "");
+  return payload;
+}
+
 async function loadAndInit() {
-  const names = getExperimentNamesFromQuery();
-  if (!names.length) {
+  const range = getTimeRangeFromQuery();
+  if (range) {
+    const displayName = getDisplayNameFromQuery();
+    let payload;
+    try {
+      payload = await fetchServerPayload(range);
+    } catch (err) {
+      setStatus(err && err.message ? err.message : "Failed to load server data", "error");
+      return;
+    }
+    const expNameRaw = displayName || payload.experiment_name || `devnet ${range.start}..${range.end}`;
+    const expName = trimLabel(expNameRaw, 15);
+    const stats = computeStatsFromCompressed(payload, expName);
+    const experiments = [{ name: expName, stats }];
+
+    setTitle([expNameRaw]);
+    const data = buildPlotsData(experiments);
+    PLOTS_DATA = data.plotsData;
+    UNION_KEYS = data.unionKeys;
+    UNION_MAP = data.unionMap;
+    EXP_SHORT_NAMES = data.expShortNames;
+
+    initializeUI();
     return;
   }
 
+  const names = getExperimentNamesFromQuery();
+  if (!names.length) {
+    setStatus("Provide start/end or experiment query parameters.", "error");
+    return;
+  }
+
+  setStatus(`Loading local logs: ${names.join(", ")}`, "loading");
   try {
     await Promise.all(names.map(loadExperimentScript));
   } catch (err) {
+    setStatus("Failed to load local records.js files.", "error");
     return;
   }
 
+  setTitle(names);
   const payloadMap = window.__compressed_records || {};
   const experiments = names
     .map(name => {
       const payload = payloadMap[name];
       if (!payload) return null;
-      const stats = computeStatsFromCompressed(payload, name);
-      return { name, stats };
+      const displayName = trimLabel(name, 15);
+      const stats = computeStatsFromCompressed(payload, displayName);
+      return { name: displayName, stats };
     })
     .filter(Boolean);
   if (!experiments.length) {
+    setStatus("No local data found for requested experiments.", "error");
     return;
   }
 
-  setTitle(experiments.map(e => e.name));
   const data = buildPlotsData(experiments);
   PLOTS_DATA = data.plotsData;
   UNION_KEYS = data.unionKeys;
   UNION_MAP = data.unionMap;
   EXP_SHORT_NAMES = data.expShortNames;
 
+  setStatus("", "");
   initializeUI();
 }
 
