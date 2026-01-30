@@ -104,6 +104,7 @@ function computeStatsFromCompressed(payload, fallbackName) {
   const typeMap = maps.type || [];
   const calledFromMap = maps.called_from || [];
   const nodeMap = maps.node_id || [];
+  const compressionMap = maps.compression || [];
 
   const ts0 = payload.ts0 ? Date.parse(payload.ts0) : null;
   if (!Array.isArray(payload.blocks) || ts0 === null || Number.isNaN(ts0)) {
@@ -141,6 +142,7 @@ function computeStatsFromCompressed(payload, fallbackName) {
       const type = typeMap[rec[recIdx.type_idx]];
       const calledFrom = calledFromMap[rec[recIdx.called_from_idx]];
       const nodeId = nodeMap[rec[recIdx.node_idx]];
+      const compression = compressionMap[rec[recIdx.compression_idx]];
 
       const sizeIndex = rec[recIdx.size_idx];
       const sizePair = (sizeMap && sizeMap[sizeIndex]) ? sizeMap[sizeIndex] : [null, null];
@@ -182,6 +184,7 @@ function computeStatsFromCompressed(payload, fallbackName) {
         stage,
         type,
         called_from: calledFrom ?? null,
+        compression: compression ?? null,
         node_id: nodeId,
       });
     }
@@ -537,6 +540,20 @@ function formatDuration(seconds) {
 function formatSecondsShort(seconds) {
   if (!Number.isFinite(seconds)) return "--";
   return `${seconds.toFixed(3)}s`;
+}
+
+function hashToHue(value) {
+  const str = String(value || "");
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    hash = (hash * 31 + str.charCodeAt(i)) >>> 0;
+  }
+  return hash % 360;
+}
+
+function labelToRowBg(label) {
+  const hue = hashToHue(label);
+  return `hsla(${hue}, 70%, 92%, 0.6)`;
 }
 
 function trimBlockId(id, maxLen = 14) {
@@ -1164,15 +1181,20 @@ function renderBlockDetails(block, targetId = "block-details") {
     const stage = rec.stage || "other";
     const stageClass = stage === "compress" || stage === "decompress" ? stage : "other";
     const typeLabel = rec.type || "unknown";
+    const calledFromRaw = rec.called_from || "None";
     const calledFrom = rec.called_from ? ` (${rec.called_from})` : "";
+    const rowKey = `${typeLabel}__${calledFromRaw}`;
+    const rowBg = labelToRowBg(rowKey);
     const nodeLabel = rec.node_id ? String(rec.node_id) : "--";
+    const compressionLabel = rec.compression ? `comp: ${rec.compression}` : "--";
     return `
-      <div class="timeline-row">
+      <div class="timeline-row" style="background:${rowBg};">
         <div class="timeline-index">${idx + 1}.</div>
         <div>${startLabel} -> ${endLabel}</div>
         <div class="timeline-stage ${stageClass}">${stage}</div>
         <div class="timeline-node">${nodeLabel}</div>
         <div>${typeLabel}${calledFrom}</div>
+        <div>${compressionLabel}</div>
       </div>
     `;
   }).join("");
@@ -1505,18 +1527,36 @@ function trimLabel(value, maxLen = 15) {
   return trimmed.length > maxLen ? trimmed.slice(0, maxLen) : trimmed;
 }
 
-function loadExperimentScript(name) {
+function loadScript(src) {
   return new Promise((resolve, reject) => {
-    if (window.__compressed_records && window.__compressed_records[name]) {
-      resolve();
-      return;
-    }
     const script = document.createElement("script");
-    script.src = `logs/${name}/records.js`;
-    script.onload = () => resolve();
-    script.onerror = () => reject(new Error(`Failed to load logs/${name}/records.js`));
+    script.src = src;
+    script.onload = () => resolve(src);
+    script.onerror = () => reject(new Error(`Failed to load ${src}`));
     document.head.appendChild(script);
   });
+}
+
+async function loadExperimentScript(name) {
+  if (window.__compressed_records && window.__compressed_records[name]) {
+    return;
+  }
+  const candidates = [
+    `../logs_/${name}/records.js`,
+    `logs/${name}/records.js`,
+    `../logs/${name}/records.js`,
+  ];
+  let lastError = null;
+  for (const src of candidates) {
+    try {
+      await loadScript(src);
+      return;
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  const tried = candidates.join(", ");
+  throw new Error(`Failed to load records.js from: ${tried}${lastError ? ` (${lastError.message})` : ""}`);
 }
 
 async function fetchServerPayload(range) {

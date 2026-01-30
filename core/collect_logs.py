@@ -1,438 +1,130 @@
 #!/usr/bin/env python3
 """
-Collect benchmark lines from centralized devnet/testnet logs.
-
-Reads log files from remote servers, filters ONLY lines containing
-"Broadcast_benchmark" within a [start, end] time window, and writes:
-
-  logs/<experiment_name>/benchmark.log
-  logs/<experiment_name>/info.json
-
-Usage:
-  python3 collect_logs.py <experiment_name> [OPTIONS]
-
-Options:
-  --testnet          Collect from testnet logs instead of devnet
-  --dashboard URL    Dashboard URL with start/end timestamps
-  --start TS         Start collecting from this ISO timestamp (UTC)
-  --end TS           End collecting at this ISO timestamp (UTC)
-
-If no time parameters are provided, collects all benchmark logs for today (UTC).
+Fetch compressed benchmark records from the remote HTTP server and save them
+as logs/<experiment>/records.json.
 """
 
 from __future__ import annotations
 
+import argparse
+import gzip
 import json
-import os
 import sys
-import subprocess
-from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
-from typing import Iterable
-from urllib.parse import urlparse, parse_qs, unquote
+from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, unquote, urlencode
+from urllib.request import Request, urlopen
 
 
-# Network configurations
-NETWORKS = {
-    "devnet": {
-        "host": "devnet-log.toncenter.com",
-        "remote_dir": "/var/log/devnet",
-        "file_prefix": "devnet",
-    },
-    "testnet": {
-        "host": "devnet-log.toncenter.com",
-        "remote_dir": "/var/log/testnet",
-        "file_prefix": "testnet",
-    },
-}
-
-LOG_USER = "vallas"
-NEEDLE = "Broadcast_benchmark"
-
-
-def _use_color() -> bool:
-    # Respect the informal NO_COLOR convention and avoid ANSI when not a TTY.
-    if os.environ.get("NO_COLOR") is not None:
-        return False
-    try:
-        return sys.stdout.isatty()
-    except Exception:
-        return False
-
-
-_COLOR = _use_color()
-
-
-def _c(text: str, code: str) -> str:
-    if not _COLOR:
-        return text
-    return f"\033[{code}m{text}\033[0m"
-
-
-def c_label(text: str) -> str:
-    return _c(text, "1;36")  # bold cyan
-
-
-def c_ok(text: str) -> str:
-    return _c(text, "1;32")  # bold green
-
-
-def c_warn(text: str) -> str:
-    return _c(text, "1;33")  # bold yellow
-
-
-def c_err(text: str) -> str:
-    return _c(text, "1;31")  # bold red
+DEFAULT_BASE_URL = "http://devnet-log.toncenter.com:8080/get_benchmark_data"
+DEFAULT_TIMEOUT_S = 300
+DEFAULT_NETWORK = "devnet"
 
 
 def die(msg: str) -> None:
-    # stderr coloring is best-effort; if stderr isn't a TTY, it will just show plain text.
-    prefix = "Error"
-    if os.environ.get("NO_COLOR") is None:
-        try:
-            if sys.stderr.isatty():
-                prefix = _c(prefix, "1;31")
-        except Exception:
-            pass
-    print(f"{prefix}: {msg}", file=sys.stderr)
+    print(f"Error: {msg}", file=sys.stderr)
     sys.exit(1)
 
 
-def usage() -> None:
-    print(
-        "Usage:\n"
-        "  python3 collect_logs.py <experiment_name> [OPTIONS]\n\n"
-        "Options:\n"
-        "  --testnet          Collect from testnet logs instead of devnet\n"
-        "  --dashboard URL    Dashboard URL with start/end timestamps\n"
-        "  --start TS         Start collecting from this ISO timestamp (UTC)\n"
-        "  --end TS           End collecting at this ISO timestamp (UTC)\n\n"
-        "If no time parameters are provided, collects all benchmark logs for today (UTC).\n"
-        "If only --start is provided, collects from start to end of that day.\n"
-        "If only --end is provided, collects from start of that day to end.\n\n"
-        "Examples:\n"
-        '  python3 collect_logs.py current_compr --dashboard "http://devnet-01.toncenter.com:8000/?start=2026-01-13T21%3A15%3A33Z&end=2026-01-13T22%3A15%3A42Z"\n'
-        '  python3 collect_logs.py custom_range --start 2026-01-13T21:15:33Z --end 2026-01-13T22:15:42Z\n'
-        '  python3 collect_logs.py from_midday --start 2026-01-13T12:00:00Z\n'
-        "  python3 collect_logs.py today_logs\n"
-        "  python3 collect_logs.py testnet_today --testnet\n",
-        file=sys.stderr,
-    )
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Fetch records.json from devnet-log server.")
+    parser.add_argument("experiment", help="Local experiment directory name (logs/<experiment>/records.json)")
+    parser.add_argument("--start", help="Start timestamp (passed through to server, no parsing)")
+    parser.add_argument("--end", help="End timestamp (passed through to server, no parsing)")
+    parser.add_argument("--dashboard", help="Dashboard URL with start/end query params")
+    return parser.parse_args()
 
 
-def parse_iso_utc(ts: str) -> datetime:
-    """
-    Parse ISO timestamp with optional 'Z' (UTC) and return an aware UTC datetime.
-    """
-    ts = ts.strip()
-    if ts.endswith("Z"):
-        ts = ts[:-1] + "+00:00"
-    try:
-        dt = datetime.fromisoformat(ts)
-    except ValueError as e:
-        raise ValueError(f"invalid ISO timestamp '{ts}': {e}") from e
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
-
-
-def to_z(dt: datetime) -> str:
-    """
-    Format UTC datetime as ISO with trailing 'Z'.
-    Keeps seconds if no fractional part; otherwise milliseconds.
-    """
-    dt = dt.astimezone(timezone.utc)
-    if dt.microsecond:
-        s = dt.isoformat(timespec="milliseconds")
-    else:
-        s = dt.isoformat(timespec="seconds")
-    return s.replace("+00:00", "Z")
-
-
-def to_log_prefix(dt: datetime) -> str:
-    """
-    Format UTC datetime to match the log's first token prefix:
-      2026-01-13T21:37:06+00:00
-    """
-    dt = dt.astimezone(timezone.utc)
-    # Keep seconds precision; logs in example have no fractional part in first token.
-    return dt.isoformat(timespec="seconds")
-
-
-@dataclass(frozen=True)
-class Window:
-    start: datetime
-    end: datetime
-
-    def __post_init__(self) -> None:
-        if self.end < self.start:
-            raise ValueError("end is earlier than start")
-
-    def dates(self) -> Iterable[date]:
-        d = self.start.date()
-        last = self.end.date()
-        while d <= last:
-            yield d
-            d += timedelta(days=1)
-
-
-def parse_dashboard_url(url: str) -> Window:
+def _extract_dashboard_query(url: str) -> str:
     url = url.strip().strip('"').strip("'")
-    parsed = urlparse(url)
-    qs = parse_qs(parsed.query)
-
-    def one(key: str) -> str:
-        if key not in qs or not qs[key]:
-            raise ValueError(f"missing '{key}' query parameter in URL")
-        return qs[key][0]
-
-    start_raw = unquote(one("start"))
-    end_raw = unquote(one("end"))
-    start_dt = parse_iso_utc(start_raw)
-    end_dt = parse_iso_utc(end_raw)
-    return Window(start=start_dt, end=end_dt)
+    if "?" not in url:
+        die("missing '?' in --dashboard URL")
+    _, query = url.split("?", 1)
+    if not query:
+        die("empty query string in --dashboard URL")
+    return query
 
 
-def ensure_local_outputs(experiment: str) -> tuple[Path, Path, Path]:
-    exp_dir = Path("logs") / experiment
-    exp_dir.mkdir(parents=True, exist_ok=True)
-    bench_log = exp_dir / "benchmark.log"
-    info_json = exp_dir / "info.json"
-    return exp_dir, bench_log, info_json
+def _extract_query_range(query: str) -> tuple[str, str]:
+    qs = parse_qs(query)
+    start = (qs.get("start") or [None])[0]
+    end = (qs.get("end") or [None])[0]
+    if not start or not end:
+        die("missing 'start' or 'end' in --dashboard URL query")
+    return unquote(start), unquote(end)
 
 
-def write_info_json(info_path: Path, experiment: str, url: str | None, start_param: str | None, end_param: str | None, w: Window, network: str = "devnet") -> None:
-    payload = {"name": experiment, "network": network, "url": url, "start": to_z(w.start), "end": to_z(w.end)}
-    if start_param:
-        payload["start_param"] = start_param
-    if end_param:
-        payload["end_param"] = end_param
-    info_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+def build_url(args: argparse.Namespace) -> tuple[str, str, str, str | None]:
+    start = args.start
+    end = args.end
+    dashboard_url = args.dashboard
+    if args.dashboard:
+        query = _extract_dashboard_query(args.dashboard)
+        start, end = _extract_query_range(query)
+    else:
+        if not start or not end:
+            die("Both --start and --end are required")
+        query = urlencode({"start": start, "end": end})
+    return f"{DEFAULT_BASE_URL}?{query}", start, end, dashboard_url
 
 
-def today_window_utc() -> Window:
-    """
-    Create a Window spanning all of today in UTC.
-    """
-    today = datetime.now(timezone.utc).date()
-    start = datetime.combine(today, time(0, 0, 0), tzinfo=timezone.utc)
-    end = datetime.combine(today, time(23, 59, 59, 999999), tzinfo=timezone.utc)
-    return Window(start=start, end=end)
+def fetch_payload(url: str, timeout_s: int) -> str:
+    req = Request(url, headers={"Accept-Encoding": "gzip"})
+    try:
+        with urlopen(req, timeout=timeout_s) as resp:
+            body = resp.read()
+            encoding = (resp.headers.get("Content-Encoding") or "").lower()
+    except HTTPError as exc:
+        detail = ""
+        try:
+            raw = exc.read()
+            if raw:
+                text = raw.decode("utf-8", errors="replace").strip()
+                try:
+                    payload = json.loads(text)
+                    detail = payload.get("error") or text
+                except json.JSONDecodeError:
+                    detail = text
+        except Exception:
+            detail = ""
+        suffix = f": {detail}" if detail else ""
+        die(f"Request failed: {exc.code} {exc.reason}{suffix}")
+    except URLError as exc:
+        die(f"Request failed: {exc.reason}")
 
-
-def ssh_extract_file(host: str, remote_file: str, start_cmp: str, end_cmp: str, out_fh) -> None:
-    """
-    Stream filtered lines from a remote file to out_fh.
-
-    Filtering logic (fast path):
-      - assumes remote file is ordered by timestamp
-      - skips until >= start
-      - exits as soon as > end
-      - only prints lines containing NEEDLE
-    """
-    remote_script = r"""
-set -euo pipefail
-file="$1"
-start="$2"
-end="$3"
-
-if [ ! -f "$file" ]; then
-  exit 0
-fi
-
-# First narrow down to benchmark lines with grep (fast C implementation),
-# then apply time-window filtering on that much smaller subset via awk.
-
-tmp="$(mktemp /tmp/bench_grep_XXXXXX)"
-cleanup() { rm -f "$tmp" >/dev/null 2>&1 || true; }
-trap cleanup EXIT
-
-set +e
-LC_ALL=C grep -F "%s" "$file" >"$tmp"
-rc_grep=$?
-set -e
-
-# grep exit codes: 0 = matches, 1 = no matches, 2 = error
-if [ "$rc_grep" -eq 1 ]; then
-  exit 0
-fi
-if [ "$rc_grep" -ne 0 ]; then
-  exit "$rc_grep"
-fi
-
-LC_ALL=C awk -v s="$start" -v e="$end" '
-  $1 < s { next }
-  $1 > e { exit }
-  { print }
-' "$tmp"
-""" % (NEEDLE.replace('"', '\\"'))
-
-    proc = subprocess.run(
-        ["ssh", f"{LOG_USER}@{host}", "bash", "-s", "--", remote_file, start_cmp, end_cmp],
-        input=remote_script.encode("utf-8"),
-        stdout=out_fh,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
-    if proc.returncode != 0:
-        err = proc.stderr.decode("utf-8", errors="replace").strip()
-        raise RuntimeError(f"ssh/awk failed for {remote_file}: {err or 'unknown error'}")
-
-
-def day_bounds_utc(d: date) -> tuple[datetime, datetime]:
-    start = datetime.combine(d, time(0, 0, 0), tzinfo=timezone.utc)
-    # Use end-of-day with microseconds to make inclusive comparisons safe.
-    end = datetime.combine(d, time(23, 59, 59, 999999), tzinfo=timezone.utc)
-    return start, end
-
-
-def run_parse_logs(experiment: str) -> None:
-    parse_script = Path(__file__).resolve().parent / "parse_logs.py"
-    proc = subprocess.run(
-        [sys.executable, str(parse_script), experiment],
-        check=False,
-    )
-    if proc.returncode != 0:
-        die(f"parse_logs.py failed with exit code {proc.returncode}")
+    if encoding == "gzip":
+        body = gzip.decompress(body)
+    return body.decode("utf-8")
 
 
 def main() -> None:
-    if len(sys.argv) < 2 or "--help" in sys.argv or "-h" in sys.argv:
-        usage()
-        sys.exit(0 if "--help" in sys.argv or "-h" in sys.argv else 1)
+    args = parse_args()
+    url, start, end, dashboard_url = build_url(args)
+    base_dir = Path(__file__).resolve().parents[1] / "logs"
+    experiment_dir = base_dir / args.experiment
+    experiment_dir.mkdir(parents=True, exist_ok=True)
+    out_path = experiment_dir / "records.json"
 
-    # Parse arguments
-    args = sys.argv[1:]
-    
-    # Extract --testnet flag
-    use_testnet = "--testnet" in args
-    if use_testnet:
-        args.remove("--testnet")
-    
-    # Extract --dashboard URL
-    dashboard_url: str | None = None
-    if "--dashboard" in args:
-        dash_idx = args.index("--dashboard")
-        if dash_idx + 1 >= len(args):
-            die("--dashboard requires a URL argument")
-        dashboard_url = args[dash_idx + 1]
-        # Remove both --dashboard and its value
-        args.pop(dash_idx + 1)
-        args.pop(dash_idx)
-
-    # Extract --start and --end
-    start_time_str: str | None = None
-    end_time_str: str | None = None
-
-    if "--start" in args:
-        start_idx = args.index("--start")
-        if start_idx + 1 >= len(args):
-            die("--start requires a timestamp argument")
-        start_time_str = args[start_idx + 1]
-        # Remove both --start and its value
-        args.pop(start_idx + 1)
-        args.pop(start_idx)
-
-    if "--end" in args:
-        end_idx = args.index("--end")
-        if end_idx + 1 >= len(args):
-            die("--end requires a timestamp argument")
-        end_time_str = args[end_idx + 1]
-        # Remove both --end and its value
-        args.pop(end_idx + 1)
-        args.pop(end_idx)
-    
-    if not args:
-        usage()
-        sys.exit(1)
-    
-    experiment = args[0]
-    
-    # Select network configuration
-    network = "testnet" if use_testnet else "devnet"
-    net_config = NETWORKS[network]
-    host = net_config["host"]
-    remote_dir = net_config["remote_dir"]
-    file_prefix = net_config["file_prefix"]
-
-    if dashboard_url:
-        try:
-            w = parse_dashboard_url(dashboard_url)
-        except Exception as e:
-            die(str(e))
-    elif start_time_str or end_time_str:
-        # Parse start_time and end_time
-        try:
-            start_dt = parse_iso_utc(start_time_str) if start_time_str else None
-            end_dt = parse_iso_utc(end_time_str) if end_time_str else None
-
-            if start_dt and end_dt:
-                w = Window(start=start_dt, end=end_dt)
-            elif start_dt and not end_dt:
-                # Start time provided but no end time - use to end of day
-                day_start, day_end = day_bounds_utc(start_dt.date())
-                w = Window(start=start_dt, end=day_end)
-            elif end_dt and not start_dt:
-                # End time provided but no start time - use from start of day
-                day_start, day_end = day_bounds_utc(end_dt.date())
-                w = Window(start=day_start, end=end_dt)
-            else:
-                die("Both --start_time and --end_time cannot be empty")
-
-        except Exception as e:
-            die(f"Invalid timestamp: {e}")
-    else:
-        # No time parameters provided - use today's full day
-        w = today_window_utc()
-        print(f"{c_warn('No time parameters provided')} - collecting all logs for today (UTC)")
-
-    _, bench_log, info_json = ensure_local_outputs(experiment)
-    write_info_json(info_json, experiment, dashboard_url, start_time_str, end_time_str, w, network)
-
-    print(f"{c_label('Experiment')}: {experiment}")
-    print(f"{c_label('Network')}: {network}")
-    if dashboard_url:
-        print(f"{c_label('Source')}: dashboard URL")
-    elif start_time_str or end_time_str:
-        print(f"{c_label('Source')}: direct time parameters")
-    else:
-        print(f"{c_label('Source')}: today's logs")
-    print(f"{c_label('Time window')}: {to_z(w.start)} .. {to_z(w.end)}")
-    
-    # Overwrite benchmark.log if exists.
-    bench_log.unlink(missing_ok=True)
-
-    total_lines = 0
-    with bench_log.open("ab") as out_fh:
-        for d in w.dates():
-            remote_file = f"{remote_dir}/{file_prefix}_{d.isoformat()}.log"
-
-            day_start, day_end = day_bounds_utc(d)
-            s = max(w.start, day_start)
-            e = min(w.end, day_end)
-
-            # If the window doesn't overlap this day (shouldn't happen), skip.
-            if e < s:
-                continue
-
-            s_cmp = to_log_prefix(s)
-            e_cmp = to_log_prefix(e)
-
-            print(f"  {c_label('•')} {remote_file} {c_warn(f'({s_cmp} .. {e_cmp})')}")
-            try:
-                ssh_extract_file(host, remote_file, s_cmp, e_cmp, out_fh)
-            except Exception as ex:
-                die(str(ex))
-
-    # Count lines cheaply.
-    try:
-        total_lines = sum(1 for _ in bench_log.open("rb"))
-    except Exception:
-        total_lines = -1
-
-    print(f"{c_ok('Done')}. {c_label('Lines')}: {total_lines}")
-    run_parse_logs(experiment)
+    print(f"Fetching: {url}")
+    payload_json = fetch_payload(url, DEFAULT_TIMEOUT_S)
+    out_path.write_text(payload_json, encoding="utf-8")
+    out_js = experiment_dir / "records.js"
+    js = (
+        "window.__compressed_records = window.__compressed_records || {};\n"
+        f"window.__compressed_records[{json.dumps(args.experiment, ensure_ascii=False)}] = "
+        f"{payload_json};\n"
+    )
+    out_js.write_text(js, encoding="utf-8")
+    info_path = experiment_dir / "info.json"
+    info = {
+        "name": args.experiment,
+        "url": dashboard_url,
+        "start": start,
+        "end": end,
+        "network": DEFAULT_NETWORK,
+    }
+    info_path.write_text(json.dumps(info, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(f"Saved: {out_path}")
 
 
 if __name__ == "__main__":

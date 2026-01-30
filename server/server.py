@@ -10,18 +10,67 @@ import sys
 import tempfile
 import time
 from cache import DiskCache
+from dataclasses import dataclass
+from datetime import date, datetime, time as dt_time, timedelta, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Iterable
 from urllib.parse import parse_qs, unquote, urlparse
 
 _ROOT_DIR = Path(__file__).resolve().parents[1]
 _CORE_DIR = _ROOT_DIR / "core"
 sys.path.insert(0, str(_CORE_DIR))
 
-from collect_logs import Window, day_bounds_utc, parse_iso_utc, to_log_prefix, to_z
 from parse_logs import build_compressed_payload_from_log
 
 _CACHE = DiskCache(Path("/var/cache/broadcast-benchmark"), max_entries=100)
+
+
+def parse_iso_utc(ts: str) -> datetime:
+    ts = ts.strip()
+    if ts.endswith("Z"):
+        ts = ts[:-1] + "+00:00"
+    dt = datetime.fromisoformat(ts)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def to_z(dt: datetime) -> str:
+    dt = dt.astimezone(timezone.utc)
+    if dt.microsecond:
+        s = dt.isoformat(timespec="milliseconds")
+    else:
+        s = dt.isoformat(timespec="seconds")
+    return s.replace("+00:00", "Z")
+
+
+def to_log_prefix(dt: datetime) -> str:
+    dt = dt.astimezone(timezone.utc)
+    return dt.isoformat(timespec="seconds")
+
+
+@dataclass(frozen=True)
+class Window:
+    start: datetime
+    end: datetime
+
+    def __post_init__(self) -> None:
+        if self.end < self.start:
+            raise ValueError("end is earlier than start")
+
+    def dates(self) -> Iterable[date]:
+        d = self.start.date()
+        last = self.end.date()
+        while d <= last:
+            yield d
+            d += timedelta(days=1)
+
+
+def day_bounds_utc(d: date) -> tuple[datetime, datetime]:
+    start = datetime.combine(d, dt_time(0, 0, 0), tzinfo=timezone.utc)
+    end = datetime.combine(d, dt_time(23, 59, 59, 999999), tzinfo=timezone.utc)
+    return start, end
 
 
 def make_handler(
