@@ -21,7 +21,7 @@ _ROOT_DIR = Path(__file__).resolve().parents[1]
 _CORE_DIR = _ROOT_DIR / "core"
 sys.path.insert(0, str(_CORE_DIR))
 
-from parse_logs import build_compressed_payload_from_log
+from parse_logs import BENCHMARK_MARKER, build_compressed_payload_from_log
 
 _CACHE = DiskCache(Path("/var/cache/broadcast-benchmark"), max_entries=100)
 
@@ -145,6 +145,8 @@ def make_handler(
                                 to_log_prefix(s),
                                 "--end",
                                 to_log_prefix(e),
+                                "--marker",
+                                BENCHMARK_MARKER,
                             ]
                             proc = subprocess.run(
                                 cmd,

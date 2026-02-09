@@ -15,9 +15,6 @@ PROBE_BACK = 256 * 1024      # bytes to scan backward for a line start
 PROBE_FWD = 512 * 1024       # bytes to scan forward for a header in a probe window
 MAX_FIRST_SCAN = 8 * 1024 * 1024  # scan up to 8 MiB from start to detect net
 
-# Marker filtering: handled by grep -F
-MARKER_STR = "Broadcast_benchmark"
-
 # Timestamp bytes at beginning (fixed +00:00, no fractional seconds assumed per spec)
 TS_BYTES_RE = rb"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00"
 
@@ -227,13 +224,13 @@ def rg_filter_range(
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="Extract a time range from a huge multiline log by binary searching header lines, then keep only marker lines."
+        description="Extract a time range from a huge multiline log by binary searching header lines, optionally keep only marker lines."
     )
     ap.add_argument("path", help="Input log file path")
     ap.add_argument("--start", required=True, help="Start timestamp (inclusive), e.g. 2026-01-24T13:31:39+00:00")
     ap.add_argument("--end", required=True, help="End timestamp (inclusive), e.g. 2026-01-24T13:33:39+00:00")
     ap.add_argument("--out", default="-", help="Output file (default: stdout)")
-    ap.add_argument("--marker", default=MARKER_STR, help="Line marker to keep (default: Broadcast_benchmark)")
+    ap.add_argument("--marker", default=None, help="Line marker to keep (omit to keep all lines)")
     args = ap.parse_args()
 
     start_dt = parse_ts(args.start)
@@ -262,11 +259,17 @@ def main() -> int:
 
         if args.out == "-":
             fd_out = sys.stdout.fileno()
-            rg_filter_range(fd_in, fd_out, start_off, end_off, marker_str)
+            if marker_str is None:
+                opaque_copy_range(fd_in, fd_out, start_off, end_off)
+            else:
+                rg_filter_range(fd_in, fd_out, start_off, end_off, marker_str)
         else:
             fd_out = os.open(args.out, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o644)
             try:
-                rg_filter_range(fd_in, fd_out, start_off, end_off, marker_str)
+                if marker_str is None:
+                    opaque_copy_range(fd_in, fd_out, start_off, end_off)
+                else:
+                    rg_filter_range(fd_in, fd_out, start_off, end_off, marker_str)
             finally:
                 os.close(fd_out)
 
